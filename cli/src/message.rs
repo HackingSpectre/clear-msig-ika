@@ -189,7 +189,27 @@ fn render_param(intent: &IntentAccount, params_data: &[u8], idx: usize) -> Resul
             let bytes: [u8; 16] = params_data[offset..offset + 16].try_into()?;
             Ok(u128::from_le_bytes(bytes).to_string())
         }
+        ParamType::Bytes20 => {
+            let bytes = params_data.get(offset..offset + 20)
+                .ok_or(anyhow!("not enough param data for bytes20"))?;
+            Ok(format!("0x{}", encode_hex(bytes)))
+        }
+        ParamType::Bytes32 => {
+            let bytes = params_data.get(offset..offset + 32)
+                .ok_or(anyhow!("not enough param data for bytes32"))?;
+            Ok(format!("0x{}", encode_hex(bytes)))
+        }
     }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
 }
 
 fn param_offset(params: &[ParamEntry], params_data: &[u8], target: usize) -> Result<usize> {
@@ -203,8 +223,9 @@ fn param_offset(params: &[ParamEntry], params_data: &[u8], target: usize) -> Res
 
 fn param_size(param_type: ParamType, data: &[u8], offset: usize) -> Result<usize> {
     match param_type {
-        ParamType::Address => Ok(32),
+        ParamType::Address | ParamType::Bytes32 => Ok(32),
         ParamType::U64 | ParamType::I64 => Ok(8),
+        ParamType::Bytes20 => Ok(20),
         ParamType::String => {
             let len = *data.get(offset).ok_or(anyhow!("unexpected end of params"))? as usize;
             Ok(1 + len)

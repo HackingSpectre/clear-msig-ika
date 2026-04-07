@@ -6,12 +6,13 @@ mod instructions;
 use instructions::*;
 mod state;
 pub use state::*;
+pub mod chains;
 pub mod utils;
 
 #[cfg(test)]
 mod tests;
 
-declare_id!("msigVi8dMnmLQUuCbakipEMZhzen516QRHxGz7iX5Xv");
+declare_id!("2jsLpMRZAJUJJ7weNhBJqVAgLjpngi6xTEPUbttmTUjA");
 
 #[program]
 pub mod clear_wallet {
@@ -91,5 +92,33 @@ pub mod clear_wallet {
     #[instruction(discriminator = 5)]
     pub fn cleanup_proposal(ctx: Ctx<CleanupProposal>) -> Result<(), ProgramError> {
         ctx.accounts.cleanup()
+    }
+
+    #[instruction(discriminator = 6)]
+    pub fn bind_dwallet(
+        ctx: Ctx<BindDwallet>,
+        chain_kind: u8,
+        user_pubkey: [u8; 32],
+        signature_scheme: u8,
+        cpi_authority_bump: u8,
+    ) -> Result<(), ProgramError> {
+        ctx.accounts.bind(BindDwalletArgs {
+            chain_kind,
+            user_pubkey,
+            signature_scheme,
+            cpi_authority_bump,
+        })
+    }
+
+    #[instruction(discriminator = 7)]
+    pub fn ika_sign(
+        ctx: Ctx<IkaSign>,
+        message_approval_bump: u8,
+        cpi_authority_bump: u8,
+    ) -> Result<(), ProgramError> {
+        ctx.accounts.ika_sign(IkaSignArgs {
+            message_approval_bump,
+            cpi_authority_bump,
+        })
     }
 }

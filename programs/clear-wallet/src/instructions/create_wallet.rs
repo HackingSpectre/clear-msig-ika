@@ -124,10 +124,12 @@ impl<'info> CreateWallet<'info> {
         for (intent, index, intent_type, bump) in meta_intents {
             intent.set_inner(
                 wallet_addr, bump, index, intent_type,
+                0u8, // chain_kind = Solana (meta intents are local)
                 1u8, // approved
                 args.approval_threshold, args.cancellation_threshold,
                 args.timelock_seconds,
                 0u16, 0u16, // template offset/len
+                0u16, 0u16, // tx_template offset/len
                 0u16, // active_proposal_count
                 proposers, approvers,
                 empty_params, empty_accounts, empty_instructions,

@@ -21,6 +21,21 @@ pub fn find_proposal_address(intent: &Address, index: u64, program_id: &Address)
     )
 }
 
+pub fn find_ika_config_address(
+    wallet: &Address,
+    chain_kind: u8,
+    program_id: &Address,
+) -> (Address, u8) {
+    Address::find_program_address(
+        &[b"ika_config", wallet.as_ref(), &[chain_kind]],
+        program_id,
+    )
+}
+
+pub fn find_cpi_authority(program_id: &Address) -> (Address, u8) {
+    Address::find_program_address(&[b"__ika_cpi_authority"], program_id)
+}
+
 pub fn compute_name_hash(name: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(name.as_bytes());

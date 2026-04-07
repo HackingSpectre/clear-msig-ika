@@ -1,0 +1,20 @@
+{
+  "chain": "bitcoin_p2wpkh",
+  "tx_template": {
+    "bitcoin_p2wpkh": {
+      "version": 2,
+      "lock_time": 0,
+      "sequence": 4294967293,
+      "sighash_type": 1
+    }
+  },
+  "params": [
+    { "name": "prev_txid",         "type": "bytes32" },
+    { "name": "prev_vout",         "type": "u64" },
+    { "name": "prev_amount_sats",  "type": "u64" },
+    { "name": "sender_pkh",        "type": "bytes20" },
+    { "name": "recipient_pkh",     "type": "bytes20" },
+    { "name": "send_amount_sats",  "type": "u64" }
+  ],
+  "template": "send {5} sats to bc1q-pkh:0x{4} from utxo 0x{0}:{1}"
+}

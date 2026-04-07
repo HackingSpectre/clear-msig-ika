@@ -56,8 +56,23 @@ fn pubkey_bytes(key: &ed25519_dalek::SigningKey) -> [u8; 32] {
     key.verifying_key().to_bytes()
 }
 
+/// Wrap a raw message body in the Solana offchain message header that the
+/// on-chain `MessageBuilder` prepends. The on-chain code verifies signatures
+/// against the wrapped form, so tests must wrap before signing.
+///
+/// Format: `\xffsolana offchain` (16) + version(1) + format(1) + len LE(2) + body
+fn wrap_offchain(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(20 + body.len());
+    out.extend_from_slice(b"\xffsolana offchain");
+    out.push(0); // version 0
+    out.push(0); // format 0 = restricted ASCII
+    out.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
 fn sign_message(key: &ed25519_dalek::SigningKey, msg: &[u8]) -> [u8; 64] {
-    key.sign(msg).to_bytes()
+    key.sign(&wrap_offchain(msg)).to_bytes()
 }
 
 fn sha256_hash(data: &[u8]) -> [u8; 32] {

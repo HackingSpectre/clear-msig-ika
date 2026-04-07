@@ -81,6 +81,22 @@ pub fn encode_params(intent: &IntentAccount, raw_params: &[String]) -> Result<Ve
                     .with_context(|| format!("invalid u128 for param {name}: {value}"))?;
                 data.extend_from_slice(&val.to_le_bytes());
             }
+            ParamType::Bytes20 => {
+                let bytes = parse_hex(value)
+                    .with_context(|| format!("invalid bytes20 for param {name}: {value}"))?;
+                if bytes.len() != 20 {
+                    return Err(anyhow!("bytes20 for {name} must be 20 bytes, got {}", bytes.len()));
+                }
+                data.extend_from_slice(&bytes);
+            }
+            ParamType::Bytes32 => {
+                let bytes = parse_hex(value)
+                    .with_context(|| format!("invalid bytes32 for param {name}: {value}"))?;
+                if bytes.len() != 32 {
+                    return Err(anyhow!("bytes32 for {name} must be 32 bytes, got {}", bytes.len()));
+                }
+                data.extend_from_slice(&bytes);
+            }
         }
     }
 
@@ -98,4 +114,15 @@ pub fn encode_params(intent: &IntentAccount, raw_params: &[String]) -> Result<Ve
     }
 
     Ok(data)
+}
+
+/// Parse a hex string (with optional 0x prefix) into raw bytes.
+fn parse_hex(s: &str) -> Result<Vec<u8>> {
+    let s = s.strip_prefix("0x").unwrap_or(s);
+    if s.len() % 2 != 0 {
+        return Err(anyhow!("hex string has odd length"));
+    }
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(Into::into))
+        .collect()
 }

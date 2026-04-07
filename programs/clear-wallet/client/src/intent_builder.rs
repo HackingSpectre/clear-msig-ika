@@ -26,11 +26,14 @@ use solana_address::Address;
 /// Packed intent data ready for set_inner.
 /// Uses native Rust types (not Pod) since this runs off-chain.
 pub struct BuiltIntent {
+    pub chain_kind: u8,
     pub approval_threshold: u8,
     pub cancellation_threshold: u8,
     pub timelock_seconds: u32,
     pub template_offset: u16,
     pub template_len: u16,
+    pub tx_template_offset: u16,
+    pub tx_template_len: u16,
     pub proposers: Vec<Address>,
     pub approvers: Vec<Address>,
     pub params: Vec<ParamEntry>,
@@ -57,6 +60,7 @@ impl BuiltIntent {
 }
 
 pub struct IntentBuilder {
+    chain_kind: u8,
     approval_threshold: u8,
     cancellation_threshold: u8,
     timelock_seconds: u32,
@@ -69,6 +73,7 @@ pub struct IntentBuilder {
     seeds: Vec<SeedEntry>,
     pool: Vec<u8>,
     template: String,
+    tx_template: Vec<u8>,
 }
 
 impl Default for IntentBuilder {
@@ -78,6 +83,7 @@ impl Default for IntentBuilder {
 impl IntentBuilder {
     pub fn new() -> Self {
         Self {
+            chain_kind: 0,
             approval_threshold: 1,
             cancellation_threshold: 1,
             timelock_seconds: 0,
@@ -90,7 +96,20 @@ impl IntentBuilder {
             seeds: Vec::new(),
             pool: Vec::new(),
             template: String::new(),
+            tx_template: Vec::new(),
         }
+    }
+
+    pub fn set_chain_kind(&mut self, chain_kind: u8) -> &mut Self {
+        self.chain_kind = chain_kind;
+        self
+    }
+
+    /// Sets the chain-specific transaction template (raw bytes).
+    /// Layout depends on chain_kind — see `clear_wallet::chains` for per-chain formats.
+    pub fn set_tx_template(&mut self, tx_template: &[u8]) -> &mut Self {
+        self.tx_template = tx_template.to_vec();
+        self
     }
 
     pub fn set_governance(&mut self, approval: u8, cancellation: u8, timelock: u32) -> &mut Self {
@@ -258,12 +277,19 @@ impl IntentBuilder {
         self.pool.extend_from_slice(self.template.as_bytes());
         let template_len = self.template.len() as u16;
 
+        let tx_template_offset = self.pool.len() as u16;
+        self.pool.extend_from_slice(&self.tx_template);
+        let tx_template_len = self.tx_template.len() as u16;
+
         BuiltIntent {
+            chain_kind: self.chain_kind,
             approval_threshold: self.approval_threshold,
             cancellation_threshold: self.cancellation_threshold,
             timelock_seconds: self.timelock_seconds,
             template_offset,
             template_len,
+            tx_template_offset,
+            tx_template_len,
             proposers: self.proposers,
             approvers: self.approvers,
             params: self.params,
@@ -340,17 +366,20 @@ impl BuiltIntent {
     ) -> Vec<u8> {
         let mut out = Vec::new();
 
-        // Fixed header (46 bytes)
+        // Fixed header (51 bytes)
         out.extend_from_slice(wallet.as_ref());    // 32
         out.push(bump);                             // 1
         out.push(intent_index);                     // 1
         out.push(intent_type);                      // 1
+        out.push(self.chain_kind);                  // 1
         out.push(1u8); // approved                  // 1
         out.push(self.approval_threshold);           // 1
         out.push(self.cancellation_threshold);       // 1
         out.extend_from_slice(&self.timelock_seconds.to_le_bytes()); // 4
         out.extend_from_slice(&self.template_offset.to_le_bytes()); // 2
         out.extend_from_slice(&self.template_len.to_le_bytes());    // 2
+        out.extend_from_slice(&self.tx_template_offset.to_le_bytes()); // 2
+        out.extend_from_slice(&self.tx_template_len.to_le_bytes());    // 2
         out.extend_from_slice(&0u16.to_le_bytes());                 // 2: active_proposal_count = 0
 
         // Dynamic fields: u32 LE count prefix + elements

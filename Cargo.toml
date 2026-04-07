@@ -4,6 +4,7 @@ members = [
     "programs/clear-wallet",
     "programs/clear-wallet/client",
     "cli",
+    "e2e",
 ]
 default-members = [
     "programs/clear-wallet",

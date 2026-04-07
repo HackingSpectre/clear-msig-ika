@@ -15,6 +15,12 @@ pub enum ParamType {
     U16 = 6,
     U32 = 7,
     U128 = 8,
+    /// 20-byte fixed buffer. Used for EVM addresses and Bitcoin HASH160
+    /// (P2WPKH witness program).
+    Bytes20 = 9,
+    /// 32-byte fixed buffer. Used for transaction hashes, BTC scriptPubKey
+    /// hashes (P2WSH/P2TR), and large counters.
+    Bytes32 = 10,
 }
 
 #[repr(u8)]
@@ -141,8 +147,9 @@ pub struct SeedEntry {
 
 pub fn param_byte_size(param_type: ParamType, params_data: &[u8], offset: usize) -> Result<usize, ProgramError> {
     match param_type {
-        ParamType::Address => Ok(32),
+        ParamType::Address | ParamType::Bytes32 => Ok(32),
         ParamType::U64 | ParamType::I64 => Ok(8),
+        ParamType::Bytes20 => Ok(20),
         ParamType::String => {
             let len = *params_data.get(offset).ok_or(ProgramError::InvalidInstructionData)? as usize;
             Ok(1 + len)

@@ -1,0 +1,18 @@
+{
+  "chain": "evm_1559",
+  "tx_template": {
+    "evm_1559": {
+      "chain_id": 1,
+      "gas_limit": 21000,
+      "max_priority_fee_per_gas": 1500000000,
+      "max_fee_per_gas": 30000000000
+    }
+  },
+  "params": [
+    { "name": "nonce",     "type": "u64" },
+    { "name": "to",        "type": "bytes20" },
+    { "name": "value_wei", "type": "u64" },
+    { "name": "data",      "type": "string" }
+  ],
+  "template": "send {2} wei to 0x{1} (nonce {0})"
+}

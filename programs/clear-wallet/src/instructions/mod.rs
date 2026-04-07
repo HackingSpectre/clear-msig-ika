@@ -15,3 +15,9 @@ pub use execute::*;
 
 pub mod cleanup_proposal;
 pub use cleanup_proposal::*;
+
+pub mod bind_dwallet;
+pub use bind_dwallet::*;
+
+pub mod ika_sign;
+pub use ika_sign::*;

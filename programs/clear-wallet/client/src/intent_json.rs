@@ -12,14 +12,122 @@ pub struct IntentDefinitionJson {
     pub cancellation_threshold: u8,
     #[serde(default)]
     pub timelock_seconds: u32,
+    /// Destination chain. Defaults to `solana` (local CPI execution). Set to
+    /// `evm_1559`, `bitcoin_p2wpkh`, or `zcash_transparent` for cross-chain
+    /// signing via Ika `ika_sign`.
+    #[serde(default)]
+    pub chain: ChainKindJson,
     #[serde(default)]
     pub params: Vec<ParamDefJson>,
+    /// Solana intents only. Ignored for remote-chain intents.
     #[serde(default)]
     pub accounts: Vec<AccountDefJson>,
+    /// Solana intents only. Ignored for remote-chain intents.
     #[serde(default)]
     pub instructions: Vec<InstructionDefJson>,
+    /// Remote-chain intents only. Carries the chain-specific transaction
+    /// template (e.g. EVM chain_id/gas, BTC version/locktime).
+    #[serde(default)]
+    pub tx_template: Option<TxTemplateJson>,
     #[serde(default)]
     pub template: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainKindJson {
+    #[default]
+    Solana,
+    #[serde(rename = "evm_1559")]
+    Evm1559,
+    BitcoinP2wpkh,
+    ZcashTransparent,
+}
+
+impl ChainKindJson {
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Solana => 0,
+            Self::Evm1559 => 1,
+            Self::BitcoinP2wpkh => 2,
+            Self::ZcashTransparent => 3,
+        }
+    }
+
+    pub fn is_remote(self) -> bool {
+        !matches!(self, Self::Solana)
+    }
+}
+
+/// Chain-specific transaction template, deserialized from JSON and packed into
+/// the binary `tx_template` blob the program expects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TxTemplateJson {
+    /// EIP-1559: 32 bytes total. Fees are u64 zat-style; for chains where
+    /// max_fee exceeds u64 (very rare), extend the on-chain serializer.
+    #[serde(rename = "evm_1559")]
+    Evm1559 {
+        chain_id: u64,
+        gas_limit: u64,
+        max_priority_fee_per_gas: u64,
+        max_fee_per_gas: u64,
+    },
+    /// BIP143 P2WPKH: 16 bytes total.
+    BitcoinP2wpkh {
+        version: u32,
+        lock_time: u32,
+        sequence: u32,
+        sighash_type: u32,
+    },
+    /// ZIP-244 transparent (NU5+): 16 bytes total.
+    ZcashTransparent {
+        version_group_id: u32,
+        consensus_branch_id: u32,
+        lock_time: u32,
+        expiry_height: u32,
+    },
+}
+
+impl TxTemplateJson {
+    /// Serialize into the binary format the program's chain serializer expects.
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Evm1559 { chain_id, gas_limit, max_priority_fee_per_gas, max_fee_per_gas } => {
+                let mut out = Vec::with_capacity(32);
+                out.extend_from_slice(&chain_id.to_le_bytes());
+                out.extend_from_slice(&gas_limit.to_le_bytes());
+                out.extend_from_slice(&max_priority_fee_per_gas.to_le_bytes());
+                out.extend_from_slice(&max_fee_per_gas.to_le_bytes());
+                out
+            }
+            Self::BitcoinP2wpkh { version, lock_time, sequence, sighash_type } => {
+                let mut out = Vec::with_capacity(16);
+                out.extend_from_slice(&version.to_le_bytes());
+                out.extend_from_slice(&lock_time.to_le_bytes());
+                out.extend_from_slice(&sequence.to_le_bytes());
+                out.extend_from_slice(&sighash_type.to_le_bytes());
+                out
+            }
+            Self::ZcashTransparent { version_group_id, consensus_branch_id, lock_time, expiry_height } => {
+                let mut out = Vec::with_capacity(16);
+                out.extend_from_slice(&version_group_id.to_le_bytes());
+                out.extend_from_slice(&consensus_branch_id.to_le_bytes());
+                out.extend_from_slice(&lock_time.to_le_bytes());
+                out.extend_from_slice(&expiry_height.to_le_bytes());
+                out
+            }
+        }
+    }
+
+    pub fn matches_chain(&self, chain: ChainKindJson) -> bool {
+        matches!(
+            (self, chain),
+            (Self::Evm1559 { .. }, ChainKindJson::Evm1559)
+                | (Self::BitcoinP2wpkh { .. }, ChainKindJson::BitcoinP2wpkh)
+                | (Self::ZcashTransparent { .. }, ChainKindJson::ZcashTransparent)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -33,7 +141,7 @@ pub struct ParamDefJson {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ParamTypeJson { Address, U64, I64, String, Bool, U8, U16, U32, U128 }
+pub enum ParamTypeJson { Address, U64, I64, String, Bool, U8, U16, U32, U128, Bytes20, Bytes32 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -97,11 +205,15 @@ pub enum DataEncodingJson { RawAddress, LeU64, LeI64, Bool, LeU8, LeU16, LeU32, 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntentTransactionJson {
     #[serde(default)]
+    pub chain: ChainKindJson,
+    #[serde(default)]
     pub params: Vec<ParamDefJson>,
     #[serde(default)]
     pub accounts: Vec<AccountDefJson>,
     #[serde(default)]
     pub instructions: Vec<InstructionDefJson>,
+    #[serde(default)]
+    pub tx_template: Option<TxTemplateJson>,
     #[serde(default)]
     pub template: String,
 }
@@ -122,9 +234,11 @@ impl IntentTransactionJson {
             approval_threshold,
             cancellation_threshold,
             timelock_seconds,
+            chain: self.chain,
             params: self.params,
             accounts: self.accounts,
             instructions: self.instructions,
+            tx_template: self.tx_template,
             template: self.template,
         }
     }
@@ -138,6 +252,22 @@ impl IntentDefinitionJson {
     pub fn to_built(&self) -> Result<BuiltIntent, String> {
         let mut b = IntentBuilder::new();
         b.set_governance(self.approval_threshold, self.cancellation_threshold, self.timelock_seconds);
+        b.set_chain_kind(self.chain.as_u8());
+
+        // Validate chain/tx_template consistency.
+        if self.chain.is_remote() {
+            let tx = self.tx_template.as_ref()
+                .ok_or_else(|| format!("chain {:?} requires a tx_template field", self.chain))?;
+            if !tx.matches_chain(self.chain) {
+                return Err(format!(
+                    "tx_template variant does not match chain {:?}",
+                    self.chain
+                ));
+            }
+            b.set_tx_template(&tx.encode());
+        } else if self.tx_template.is_some() {
+            return Err("solana intents cannot have a tx_template".to_string());
+        }
 
         for addr_str in &self.proposers {
             b.add_proposer(parse_address(addr_str)?);
@@ -156,6 +286,8 @@ impl IntentDefinitionJson {
                 ParamTypeJson::U16 => ParamType::U16,
                 ParamTypeJson::U32 => ParamType::U32,
                 ParamTypeJson::U128 => ParamType::U128,
+                ParamTypeJson::Bytes20 => ParamType::Bytes20,
+                ParamTypeJson::Bytes32 => ParamType::Bytes32,
             };
             let constraint = match &param.constraint {
                 None => None,
@@ -316,5 +448,74 @@ mod tests {
         assert_eq!(built.approval_threshold, 1);
         assert_eq!(built.cancellation_threshold, 1);
         assert_eq!(built.timelock_seconds, 0);
+        assert_eq!(built.chain_kind, 0); // Solana
+        assert_eq!(built.tx_template_len, 0);
+    }
+
+    fn load_example(path: &str) -> IntentDefinitionJson {
+        let json = std::fs::read_to_string(path).expect("read intent json");
+        let tx: IntentTransactionJson = serde_json::from_str(&json).expect("parse intent json");
+        let placeholder = "11111111111111111111111111111111".to_string();
+        tx.with_governance(vec![placeholder.clone()], vec![placeholder], 1, 1, 0)
+    }
+
+    #[test]
+    fn test_evm_intent_from_file() {
+        let built = load_example("../../../examples/intents/evm_transfer.json").to_built().unwrap();
+        assert_eq!(built.chain_kind, 1); // Evm1559
+        assert_eq!(built.tx_template_len, 32);
+        assert_eq!(built.params.len(), 4);
+    }
+
+    #[test]
+    fn test_btc_intent_from_file() {
+        let built = load_example("../../../examples/intents/btc_transfer.json").to_built().unwrap();
+        assert_eq!(built.chain_kind, 2); // BitcoinP2wpkh
+        assert_eq!(built.tx_template_len, 16);
+        assert_eq!(built.params.len(), 6);
+    }
+
+    #[test]
+    fn test_zec_intent_from_file() {
+        let built = load_example("../../../examples/intents/zec_transfer.json").to_built().unwrap();
+        assert_eq!(built.chain_kind, 3); // ZcashTransparent
+        assert_eq!(built.tx_template_len, 16);
+        assert_eq!(built.params.len(), 6);
+    }
+
+    #[test]
+    fn test_chain_template_mismatch_rejected() {
+        let json = serde_json::json!({
+            "proposers": [], "approvers": [],
+            "chain": "evm_1559",
+            "tx_template": {
+                "bitcoin_p2wpkh": { "version": 2, "lock_time": 0, "sequence": 0, "sighash_type": 1 }
+            },
+            "template": ""
+        });
+        let def: IntentDefinitionJson = serde_json::from_value(json).unwrap();
+        assert!(def.to_built().is_err());
+    }
+
+    #[test]
+    fn test_solana_with_tx_template_rejected() {
+        let json = serde_json::json!({
+            "proposers": [], "approvers": [],
+            "tx_template": {
+                "evm_1559": { "chain_id": 1, "gas_limit": 21000, "max_priority_fee_per_gas": 0, "max_fee_per_gas": 0 }
+            },
+            "template": ""
+        });
+        let def: IntentDefinitionJson = serde_json::from_value(json).unwrap();
+        assert!(def.to_built().is_err());
+    }
+
+    #[test]
+    fn test_remote_chain_requires_tx_template() {
+        let json = serde_json::json!({
+            "proposers": [], "approvers": [], "chain": "evm_1559", "template": ""
+        });
+        let def: IntentDefinitionJson = serde_json::from_value(json).unwrap();
+        assert!(def.to_built().is_err());
     }
 }

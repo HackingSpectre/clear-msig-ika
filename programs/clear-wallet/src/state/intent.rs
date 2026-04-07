@@ -4,11 +4,15 @@ use crate::utils::definition::*;
 
 /// Raw byte offsets in the Intent account data for fields that need
 /// direct access from remaining_accounts (where quasar casting isn't available).
-/// Layout: disc(1) + wallet(32) + bump(1) + intent_index(1) + intent_type(1) + approved(1)
+/// Layout: disc(1) + wallet(32) + bump(1) + intent_index(1) + intent_type(1)
+///  + chain_kind(1) + approved(1)
 ///  + approval_threshold(1) + cancellation_threshold(1) + timelock_seconds(4)
-///  + template_offset(2) + template_len(2) + active_proposal_count(2)
-pub const INTENT_APPROVED_OFFSET: usize = 1 + 32 + 1 + 1 + 1; // = 36
-pub const INTENT_ACTIVE_PROPOSAL_COUNT_OFFSET: usize = 1 + 32 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 2 + 2; // = 47
+///  + template_offset(2) + template_len(2)
+///  + tx_template_offset(2) + tx_template_len(2)
+///  + active_proposal_count(2)
+pub const INTENT_APPROVED_OFFSET: usize = 1 + 32 + 1 + 1 + 1 + 1; // = 37
+pub const INTENT_ACTIVE_PROPOSAL_COUNT_OFFSET: usize =
+    1 + 32 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 4 + 2 + 2 + 2 + 2; // = 52
 
 #[repr(u8)]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -40,6 +44,11 @@ pub struct Intent<'a> {
     pub bump: u8,
     pub intent_index: u8,
     pub intent_type: IntentType,
+    /// Destination chain. `Solana` (= 0) means the intent is executed via
+    /// the local CPI executor (`execute`). Any other value means the intent
+    /// is executed via `ika_sign`, which builds a destination-chain
+    /// transaction from the params and CPIs Ika `approve_message`.
+    pub chain_kind: u8,
     pub approved: u8,
 
     // --- Governance ---
@@ -48,6 +57,10 @@ pub struct Intent<'a> {
     pub timelock_seconds: u32,
     pub template_offset: u16,
     pub template_len: u16,
+    /// Byte-pool range of the chain-specific transaction template.
+    /// Layout depends on `chain_kind`; see `crate::chains` for per-chain formats.
+    pub tx_template_offset: u16,
+    pub tx_template_len: u16,
     /// Number of open (Active or Approved) proposals using this intent.
     /// Prevents intent modification while proposals are in flight.
     pub active_proposal_count: u16,
@@ -84,6 +97,20 @@ impl Intent<'_> {
             .iter()
             .position(|a| a == address)
             .map(|i| i as u8)
+    }
+
+    /// Returns the chain-specific tx template bytes (may be empty for Solana intents).
+    pub fn tx_template_bytes(&self) -> Result<&[u8], ProgramError> {
+        let pool = self.byte_pool();
+        let offset = self.tx_template_offset.get() as usize;
+        let len = self.tx_template_len.get() as usize;
+        if len == 0 {
+            return Ok(&[]);
+        }
+        if offset + len > pool.len() {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        Ok(&pool[offset..offset + len])
     }
 
     pub fn template_str(&self) -> Result<&str, ProgramError> {
@@ -216,6 +243,20 @@ impl Intent<'_> {
                         ProgramError::InvalidInstructionData
                     );
                     offset += 16;
+                }
+                ParamType::Bytes20 => {
+                    require!(
+                        offset + 20 <= params_data.len(),
+                        ProgramError::InvalidInstructionData
+                    );
+                    offset += 20;
+                }
+                ParamType::Bytes32 => {
+                    require!(
+                        offset + 32 <= params_data.len(),
+                        ProgramError::InvalidInstructionData
+                    );
+                    offset += 32;
                 }
             }
         }

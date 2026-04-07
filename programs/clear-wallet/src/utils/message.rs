@@ -129,6 +129,34 @@ impl MessageBuilder {
         self.push_u64(ctx.proposal_index)
     }
 
+    /// Build the deterministic preimage that gets hashed and committed to a
+    /// dWallet via Ika `approve_message`.
+    ///
+    /// Unlike the on-chain approval message used by `propose`/`approve`, this
+    /// preimage has no Solana offchain header and no expiry — it is a pure
+    /// function of `(wallet name, proposal index, rendered template, params)`.
+    /// That makes it replay-safe across multiple `ika_sign` calls and
+    /// independent of any timing arguments the caller might supply.
+    ///
+    /// Format: `clear-msig:<wallet>:<index>:<rendered template>`
+    pub fn build_ika_preimage(
+        &mut self,
+        wallet_name: &str,
+        proposal_index: u64,
+        intent: &Intent<'_>,
+        params_data: &[u8],
+    ) -> Result<(), ProgramError> {
+        // Overwrite the offchain-header reservation; this preimage is not a
+        // Solana offchain message.
+        self.len = 0;
+        self.push_str("clear-msig:")?;
+        self.push_str(wallet_name)?;
+        self.push_str(":")?;
+        self.push_u64(proposal_index)?;
+        self.push_str(":")?;
+        self.render_template(intent, params_data)
+    }
+
     /// Build the appropriate message for any intent type (meta or custom).
     /// Includes Solana offchain message header for Ledger compatibility.
     pub fn build_message_for_intent(
@@ -267,7 +295,21 @@ impl MessageBuilder {
                 let v = u128::from_le_bytes(data[offset..offset+16].try_into().map_err(|_| ProgramError::InvalidInstructionData)?);
                 self.push_u128(v)
             }
+            ParamType::Bytes20 => {
+                self.push_str("0x")?;
+                self.push_hex(&data[offset..offset + 20])
+            }
+            ParamType::Bytes32 => {
+                self.push_str("0x")?;
+                self.push_hex(&data[offset..offset + 32])
+            }
         }
+    }
+
+    /// Public access to hex rendering, used by chain serializers when they
+    /// need to embed raw bytes in a human-readable preimage.
+    pub fn write_hex(&mut self, data: &[u8]) -> Result<(), ProgramError> {
+        self.push_hex(data)
     }
 }
 
