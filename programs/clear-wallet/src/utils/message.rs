@@ -220,6 +220,15 @@ impl MessageBuilder {
         Ok(())
     }
 
+    fn push_u128(&mut self, val: u128) -> Result<(), ProgramError> {
+        if val == 0 { return self.push_bytes(b"0"); }
+        let mut buf = [0u8; 39];
+        let mut pos = 39;
+        let mut v = val;
+        while v > 0 { pos -= 1; buf[pos] = b'0' + (v % 10) as u8; v /= 10; }
+        self.push_bytes(&buf[pos..])
+    }
+
     fn render_param(&mut self, intent: &Intent<'_>, data: &[u8], idx: u8) -> Result<(), ProgramError> {
         let param = intent.params().get(idx as usize).ok_or(ProgramError::InvalidInstructionData)?;
         let offset = param_offset(intent, data, idx)?;
@@ -237,6 +246,26 @@ impl MessageBuilder {
                 let len = data[offset] as usize;
                 let s = core::str::from_utf8(&data[offset+1..offset+1+len]).map_err(|_| ProgramError::InvalidInstructionData)?;
                 self.push_str(s)
+            }
+            ParamType::Bool => {
+                let v = *data.get(offset).ok_or(ProgramError::InvalidInstructionData)?;
+                self.push_str(if v != 0 { "true" } else { "false" })
+            }
+            ParamType::U8 => {
+                let v = *data.get(offset).ok_or(ProgramError::InvalidInstructionData)?;
+                self.push_u64(v as u64)
+            }
+            ParamType::U16 => {
+                let v = u16::from_le_bytes(data[offset..offset+2].try_into().map_err(|_| ProgramError::InvalidInstructionData)?);
+                self.push_u64(v as u64)
+            }
+            ParamType::U32 => {
+                let v = u32::from_le_bytes(data[offset..offset+4].try_into().map_err(|_| ProgramError::InvalidInstructionData)?);
+                self.push_u64(v as u64)
+            }
+            ParamType::U128 => {
+                let v = u128::from_le_bytes(data[offset..offset+16].try_into().map_err(|_| ProgramError::InvalidInstructionData)?);
+                self.push_u128(v)
             }
         }
     }

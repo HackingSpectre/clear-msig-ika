@@ -44,7 +44,7 @@ pub struct LedgerMessageSigner {
 }
 
 impl LedgerMessageSigner {
-    pub fn new() -> Result<Self> {
+    pub fn new(ledger_account: Option<u32>) -> Result<Self> {
         let wallet_manager = solana_remote_wallet::remote_wallet::initialize_wallet_manager()
             .map_err(|e| anyhow!("failed to initialize wallet manager: {e}"))?;
 
@@ -56,7 +56,7 @@ impl LedgerMessageSigner {
             return Err(anyhow!("no Ledger device found — is it connected and unlocked with the Solana app open?"));
         }
 
-        let derivation_path = solana_sdk::derivation_path::DerivationPath::default();
+        let derivation_path = solana_sdk::derivation_path::DerivationPath::new_bip44(ledger_account, None);
 
         let locator = solana_remote_wallet::locator::Locator {
             manufacturer: solana_remote_wallet::locator::Manufacturer::Ledger,

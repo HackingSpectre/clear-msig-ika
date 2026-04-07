@@ -101,18 +101,32 @@ type MessageFn = dyn Fn(&str, i64, &str, u64, &[u8]) -> Vec<u8>;
 // Message builders (must match on-chain format exactly)
 // =========================================================================
 
+/// Wraps a plain-text message body with the Solana offchain message header.
+/// Format: `\xffsolana offchain` (16) + version(1) + format(1) + length(2 LE)
+fn wrap_offchain(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(20 + body.len());
+    out.extend_from_slice(b"\xffsolana offchain");
+    out.push(0); // version
+    out.push(0); // format (restricted ASCII)
+    out.extend_from_slice(&(body.len() as u16).to_le_bytes());
+    out.extend_from_slice(body);
+    out
+}
+
 fn add_intent_msg(action: &str, expiry: i64, wallet_name: &str, proposal_index: u64, data: &[u8]) -> Vec<u8> {
-    format!(
+    let body = format!(
         "expires {}: {action} add intent definition_hash: {}{}",
         format_timestamp(expiry), hex_encode(&sha256_hash(data)), message_suffix(wallet_name, proposal_index),
-    ).into_bytes()
+    );
+    wrap_offchain(body.as_bytes())
 }
 
 fn remove_intent_msg(action: &str, expiry: i64, wallet_name: &str, proposal_index: u64, intent_index: u8) -> Vec<u8> {
-    format!(
+    let body = format!(
         "expires {}: {action} remove intent {intent_index}{}",
         format_timestamp(expiry), message_suffix(wallet_name, proposal_index),
-    ).into_bytes()
+    );
+    wrap_offchain(body.as_bytes())
 }
 
 // =========================================================================
@@ -415,8 +429,8 @@ fn test_cancel_overrides_approval() {
     svm.process_instruction(&build_approve_ix(wallet, add_intent, proposal_address, DEFAULT_EXPIRY, 0, sign_message(&approver1, &msg)), &[]).unwrap();
 
     // Approver 1 switches to cancel
-    let cancel_msg = format!("expires {}: cancel add intent definition_hash: {}{}",
-        format_timestamp(DEFAULT_EXPIRY), hex_encode(&sha256_hash(&params_data)), message_suffix(wallet_name, 0)).into_bytes();
+    let cancel_msg = wrap_offchain(format!("expires {}: cancel add intent definition_hash: {}{}",
+        format_timestamp(DEFAULT_EXPIRY), hex_encode(&sha256_hash(&params_data)), message_suffix(wallet_name, 0)).as_bytes());
     svm.process_instruction(&build_cancel_ix(wallet, add_intent, proposal_address, DEFAULT_EXPIRY, 0, sign_message(&approver1, &cancel_msg)), &[]).unwrap();
 
     assert_eq!(svm.get_account(&proposal_address).unwrap().data[105], 3, "status should be Cancelled(3)");
@@ -824,8 +838,8 @@ fn test_cancel_reverts_approved_to_active() {
     assert_eq!(svm.get_account(&proposal_address).unwrap().data[105], 1, "should be Approved");
 
     // approver1 switches to cancel
-    let cancel_msg = format!("expires {}: cancel remove intent 0{}",
-        format_timestamp(DEFAULT_EXPIRY), message_suffix(wallet_name, 0)).into_bytes();
+    let cancel_msg = wrap_offchain(format!("expires {}: cancel remove intent 0{}",
+        format_timestamp(DEFAULT_EXPIRY), message_suffix(wallet_name, 0)).as_bytes());
     svm.process_instruction(&build_cancel_ix(wallet, remove_intent, proposal_address, DEFAULT_EXPIRY, 0, sign_message(&approver1, &cancel_msg)), &[]).unwrap();
 
     assert_eq!(svm.get_account(&proposal_address).unwrap().data[105], 0, "should revert to Active");
@@ -1161,16 +1175,16 @@ fn test_execute_spl_token_transfer() {
         bs58::encode(mint_address.as_ref()).into_string(),
         bs58::encode(destination_wallet.as_ref()).into_string(),
     );
-    let propose_msg = format!(
+    let propose_msg = wrap_offchain(format!(
         "expires {}: propose {rendered_template}{}",
         format_timestamp(DEFAULT_EXPIRY),
         message_suffix(wallet_name, 1), // proposal_index = 1 (we already used 0 for add intent)
-    ).into_bytes();
-    let approve_msg = format!(
+    ).as_bytes());
+    let approve_msg = wrap_offchain(format!(
         "expires {}: approve {rendered_template}{}",
         format_timestamp(DEFAULT_EXPIRY),
         message_suffix(wallet_name, 1),
-    ).into_bytes();
+    ).as_bytes());
 
     let proposal_address = get_proposal_address(new_intent_address, 1);
 

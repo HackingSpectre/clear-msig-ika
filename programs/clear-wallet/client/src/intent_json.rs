@@ -33,7 +33,7 @@ pub struct ParamDefJson {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum ParamTypeJson { Address, U64, I64, String }
+pub enum ParamTypeJson { Address, U64, I64, String, Bool, U8, U16, U32, U128 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -90,7 +90,7 @@ pub struct ParamSegmentJson { pub param_index: u8, pub encoding: DataEncodingJso
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DataEncodingJson { RawAddress, LeU64, LeI64 }
+pub enum DataEncodingJson { RawAddress, LeU64, LeI64, Bool, LeU8, LeU16, LeU32, LeU128 }
 
 /// Transaction-only intent definition (no governance fields).
 /// Used by CLI `intent add` / `intent update` where governance comes from flags.
@@ -151,6 +151,11 @@ impl IntentDefinitionJson {
                 ParamTypeJson::U64 => ParamType::U64,
                 ParamTypeJson::I64 => ParamType::I64,
                 ParamTypeJson::String => ParamType::String,
+                ParamTypeJson::Bool => ParamType::Bool,
+                ParamTypeJson::U8 => ParamType::U8,
+                ParamTypeJson::U16 => ParamType::U16,
+                ParamTypeJson::U32 => ParamType::U32,
+                ParamTypeJson::U128 => ParamType::U128,
             };
             let constraint = match &param.constraint {
                 None => None,
@@ -188,6 +193,11 @@ impl IntentDefinitionJson {
                             DataEncodingJson::RawAddress => DataEncoding::RawAddress,
                             DataEncodingJson::LeU64 => DataEncoding::LittleEndianU64,
                             DataEncodingJson::LeI64 => DataEncoding::LittleEndianI64,
+                            DataEncodingJson::Bool => DataEncoding::Bool,
+                            DataEncodingJson::LeU8 => DataEncoding::LittleEndianU8,
+                            DataEncodingJson::LeU16 => DataEncoding::LittleEndianU16,
+                            DataEncodingJson::LeU32 => DataEncoding::LittleEndianU32,
+                            DataEncodingJson::LeU128 => DataEncoding::LittleEndianU128,
                         };
                         ix_b.add_param_segment(p.param_index, enc);
                     }

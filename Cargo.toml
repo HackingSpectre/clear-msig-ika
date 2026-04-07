@@ -5,6 +5,9 @@ members = [
     "programs/clear-wallet/client",
     "cli",
 ]
+default-members = [
+    "programs/clear-wallet",
+]
 
 [patch.crates-io]
 solana-curve25519 = { path = "deps/solana-curve25519" }

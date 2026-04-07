@@ -1,0 +1,28 @@
+{
+  "params": [
+    { "name": "circuit_breaker", "type": "address" },
+    { "name": "window_size_seconds", "type": "u64" },
+    { "name": "threshold_type", "type": "u8" },
+    { "name": "threshold", "type": "u64" }
+  ],
+  "accounts": [
+    { "source": { "static": "circAbx64bbsscPbQzZAUvuXpHqrCe6fLMzc2uKXz9g" }, "signer": false, "writable": false },
+    { "source": { "param": 0 }, "signer": false, "writable": true },
+    { "source": "vault", "signer": true, "writable": false }
+  ],
+  "instructions": [
+    {
+      "program_account_index": 0,
+      "account_indexes": [1, 2],
+      "data_segments": [
+        { "literal": [27, 56, 69, 95, 73, 104, 86, 18] },
+        { "literal": [0] },
+        { "literal": [1] },
+        { "param": { "param_index": 1, "encoding": "le_u64" } },
+        { "param": { "param_index": 2, "encoding": "le_u8" } },
+        { "param": { "param_index": 3, "encoding": "le_u64" } }
+      ]
+    }
+  ],
+  "template": "update circuit breaker {0} config: window_size_seconds={1} threshold_type={2} threshold={3}"
+}

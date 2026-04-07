@@ -10,6 +10,11 @@ pub enum ParamType {
     U64 = 1,
     I64 = 2,
     String = 3,
+    Bool = 4,
+    U8 = 5,
+    U16 = 6,
+    U32 = 7,
+    U128 = 8,
 }
 
 #[repr(u8)]
@@ -51,6 +56,11 @@ pub enum DataEncoding {
     RawAddress = 0,
     LittleEndianU64 = 1,
     LittleEndianI64 = 2,
+    Bool = 3,
+    LittleEndianU8 = 4,
+    LittleEndianU16 = 5,
+    LittleEndianU32 = 6,
+    LittleEndianU128 = 7,
 }
 
 // --- Fixed-size entry types for Intent Vecs ---
@@ -137,6 +147,10 @@ pub fn param_byte_size(param_type: ParamType, params_data: &[u8], offset: usize)
             let len = *params_data.get(offset).ok_or(ProgramError::InvalidInstructionData)? as usize;
             Ok(1 + len)
         }
+        ParamType::Bool | ParamType::U8 => Ok(1),
+        ParamType::U16 => Ok(2),
+        ParamType::U32 => Ok(4),
+        ParamType::U128 => Ok(16),
     }
 }
 
@@ -146,6 +160,11 @@ impl DataEncoding {
             0 => Some(Self::RawAddress),
             1 => Some(Self::LittleEndianU64),
             2 => Some(Self::LittleEndianI64),
+            3 => Some(Self::Bool),
+            4 => Some(Self::LittleEndianU8),
+            5 => Some(Self::LittleEndianU16),
+            6 => Some(Self::LittleEndianU32),
+            7 => Some(Self::LittleEndianU128),
             _ => None,
         }
     }
@@ -154,6 +173,10 @@ impl DataEncoding {
         match self {
             Self::RawAddress => 32,
             Self::LittleEndianU64 | Self::LittleEndianI64 => 8,
+            Self::Bool | Self::LittleEndianU8 => 1,
+            Self::LittleEndianU16 => 2,
+            Self::LittleEndianU32 => 4,
+            Self::LittleEndianU128 => 16,
         }
     }
 }

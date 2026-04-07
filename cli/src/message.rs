@@ -154,7 +154,6 @@ fn render_param(intent: &IntentAccount, params_data: &[u8], idx: usize) -> Resul
         ParamType::Address => {
             let addr_bytes = params_data.get(offset..offset + 32)
                 .ok_or(anyhow!("not enough param data for address"))?;
-            // Must use the same base58 encoding as on-chain
             Ok(bs58::encode(addr_bytes).into_string())
         }
         ParamType::U64 => {
@@ -169,6 +168,26 @@ fn render_param(intent: &IntentAccount, params_data: &[u8], idx: usize) -> Resul
             let len = params_data[offset] as usize;
             let s = std::str::from_utf8(&params_data[offset + 1..offset + 1 + len])?;
             Ok(s.to_string())
+        }
+        ParamType::Bool => {
+            let v = *params_data.get(offset).ok_or(anyhow!("not enough param data for bool"))?;
+            Ok(if v != 0 { "true" } else { "false" }.to_string())
+        }
+        ParamType::U8 => {
+            let v = *params_data.get(offset).ok_or(anyhow!("not enough param data for u8"))?;
+            Ok(v.to_string())
+        }
+        ParamType::U16 => {
+            let bytes: [u8; 2] = params_data[offset..offset + 2].try_into()?;
+            Ok(u16::from_le_bytes(bytes).to_string())
+        }
+        ParamType::U32 => {
+            let bytes: [u8; 4] = params_data[offset..offset + 4].try_into()?;
+            Ok(u32::from_le_bytes(bytes).to_string())
+        }
+        ParamType::U128 => {
+            let bytes: [u8; 16] = params_data[offset..offset + 16].try_into()?;
+            Ok(u128::from_le_bytes(bytes).to_string())
         }
     }
 }
@@ -190,6 +209,10 @@ fn param_size(param_type: ParamType, data: &[u8], offset: usize) -> Result<usize
             let len = *data.get(offset).ok_or(anyhow!("unexpected end of params"))? as usize;
             Ok(1 + len)
         }
+        ParamType::Bool | ParamType::U8 => Ok(1),
+        ParamType::U16 => Ok(2),
+        ParamType::U32 => Ok(4),
+        ParamType::U128 => Ok(16),
     }
 }
 

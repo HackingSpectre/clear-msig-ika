@@ -33,6 +33,10 @@ struct Cli {
     /// Use Ledger as signer (overrides config)
     #[arg(long, global = true)]
     signer_ledger: bool,
+
+    /// Ledger derivation account index (overrides config, e.g. 10 for m/44'/501'/10')
+    #[arg(long, global = true)]
+    ledger_account: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -65,15 +69,15 @@ fn main() {
     let result = match cli.command {
         Command::Config { action } => commands::config::handle(action),
         Command::Wallet { action } => {
-            let cfg = config::load_config(&cli.url, &cli.keypair, &cli.signer, cli.signer_ledger);
+            let cfg = config::load_config(&cli.url, &cli.keypair, &cli.signer, cli.signer_ledger, cli.ledger_account);
             commands::wallet::handle(action, &cfg)
         }
         Command::Intent { action } => {
-            let cfg = config::load_config(&cli.url, &cli.keypair, &cli.signer, cli.signer_ledger);
+            let cfg = config::load_config(&cli.url, &cli.keypair, &cli.signer, cli.signer_ledger, cli.ledger_account);
             commands::intent::handle(action, &cfg)
         }
         Command::Proposal { action } => {
-            let cfg = config::load_config(&cli.url, &cli.keypair, &cli.signer, cli.signer_ledger);
+            let cfg = config::load_config(&cli.url, &cli.keypair, &cli.signer, cli.signer_ledger, cli.ledger_account);
             commands::proposal::handle(action, &cfg)
         }
     };

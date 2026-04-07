@@ -5,4 +5,11 @@ name = "clear_wallet"
 type = "solana"
 
 [testing]
-framework = "quasarsvm-rust"
+language = "rust"
+
+[testing.rust]
+framework = "quasar-svm"
+test = "cargo test tests::"
+
+[clients]
+languages = ["rust"]

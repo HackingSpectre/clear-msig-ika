@@ -1,0 +1,38 @@
+{
+  "params": [
+    { "name": "token_account", "type": "address" },
+    { "name": "authority", "type": "address" },
+    { "name": "window_size_seconds", "type": "u64" },
+    { "name": "threshold_type", "type": "u8" },
+    { "name": "threshold", "type": "u64" }
+  ],
+  "accounts": [
+    { "source": { "static": "circAbx64bbsscPbQzZAUvuXpHqrCe6fLMzc2uKXz9g" }, "signer": false, "writable": false },
+    { "source": { "static": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" }, "signer": false, "writable": false },
+    { "source": { "static": "11111111111111111111111111111111" }, "signer": false, "writable": false },
+    { "source": "vault", "signer": true, "writable": true },
+    { "source": { "pda": {
+        "program_account_index": 0,
+        "seeds": [
+          { "literal": [97, 99, 99, 111, 117, 110, 116, 95, 119, 105, 110, 100, 111, 119, 101, 100, 95, 98, 114, 101, 97, 107, 101, 114] },
+          { "param_ref": 0 }
+        ]
+      }}, "signer": false, "writable": true },
+    { "source": { "param": 0 }, "signer": false, "writable": true }
+  ],
+  "instructions": [
+    {
+      "program_account_index": 0,
+      "account_indexes": [3, 4, 5, 3, 1, 2],
+      "data_segments": [
+        { "literal": [30, 64, 99, 35, 112, 159, 41, 177] },
+        { "param": { "param_index": 1, "encoding": "raw_address" } },
+        { "param": { "param_index": 1, "encoding": "raw_address" } },
+        { "param": { "param_index": 2, "encoding": "le_u64" } },
+        { "param": { "param_index": 3, "encoding": "le_u8" } },
+        { "param": { "param_index": 4, "encoding": "le_u64" } }
+      ]
+    }
+  ],
+  "template": "initialize circuit breaker for token account {0} with authority {1}: window_size_seconds={2} threshold_type={3} threshold={4}"
+}

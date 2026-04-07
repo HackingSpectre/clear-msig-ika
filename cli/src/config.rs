@@ -15,6 +15,8 @@ pub struct PersistedConfig {
     pub signer_type: SignerType,
     #[serde(default = "default_expiry_seconds")]
     pub expiry_seconds: u64,
+    #[serde(default)]
+    pub ledger_account: Option<u32>,
 }
 
 fn default_expiry_seconds() -> u64 { 300 }
@@ -83,6 +85,7 @@ pub fn load_config(
     keypair_override: &Option<String>,
     signer_override: &Option<String>,
     signer_ledger: bool,
+    ledger_account_override: Option<u32>,
 ) -> RuntimeConfig {
     let persisted = PersistedConfig::load();
 
@@ -96,10 +99,11 @@ pub fn load_config(
     let payer = load_keypair(&payer_path)
         .expect(&format!("Failed to load payer keypair from {payer_path}"));
 
+    let ledger_account = ledger_account_override.or(persisted.ledger_account);
     let use_ledger = signer_ledger || matches!(persisted.signer_type, SignerType::Ledger);
     let signer: Box<dyn MessageSigner> = if use_ledger {
         Box::new(
-            crate::signing::LedgerMessageSigner::new()
+            crate::signing::LedgerMessageSigner::new(ledger_account)
                 .expect("Failed to connect to Ledger"),
         )
     } else {
@@ -114,6 +118,11 @@ pub fn load_config(
 
     let expiry_seconds = persisted.expiry_seconds;
     RuntimeConfig { rpc_url, payer, signer, expiry_seconds }
+}
+
+pub fn load_keypair_public(path: &str) -> Result<String> {
+    let kp = load_keypair(path)?;
+    Ok(bs58::encode(solana_sdk::signer::Signer::pubkey(&kp).to_bytes()).into_string())
 }
 
 fn load_keypair(path: &str) -> Result<solana_sdk::signer::keypair::Keypair> {

@@ -186,6 +186,34 @@ impl Intent<'_> {
                         .map_err(|_| ProgramError::InvalidInstructionData)?;
                     offset += len;
                 }
+                ParamType::Bool | ParamType::U8 => {
+                    require!(
+                        offset + 1 <= params_data.len(),
+                        ProgramError::InvalidInstructionData
+                    );
+                    offset += 1;
+                }
+                ParamType::U16 => {
+                    require!(
+                        offset + 2 <= params_data.len(),
+                        ProgramError::InvalidInstructionData
+                    );
+                    offset += 2;
+                }
+                ParamType::U32 => {
+                    require!(
+                        offset + 4 <= params_data.len(),
+                        ProgramError::InvalidInstructionData
+                    );
+                    offset += 4;
+                }
+                ParamType::U128 => {
+                    require!(
+                        offset + 16 <= params_data.len(),
+                        ProgramError::InvalidInstructionData
+                    );
+                    offset += 16;
+                }
             }
         }
         Ok(())

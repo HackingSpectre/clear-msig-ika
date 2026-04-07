@@ -53,6 +53,34 @@ pub fn encode_params(intent: &IntentAccount, raw_params: &[String]) -> Result<Ve
                 data.push(bytes.len() as u8);
                 data.extend_from_slice(bytes);
             }
+            ParamType::Bool => {
+                let val = match value.as_str() {
+                    "true" | "1" => 1u8,
+                    "false" | "0" => 0u8,
+                    _ => return Err(anyhow!("invalid bool for param {name}: {value} (expected true/false)")),
+                };
+                data.push(val);
+            }
+            ParamType::U8 => {
+                let val: u8 = value.parse()
+                    .with_context(|| format!("invalid u8 for param {name}: {value}"))?;
+                data.push(val);
+            }
+            ParamType::U16 => {
+                let val: u16 = value.parse()
+                    .with_context(|| format!("invalid u16 for param {name}: {value}"))?;
+                data.extend_from_slice(&val.to_le_bytes());
+            }
+            ParamType::U32 => {
+                let val: u32 = value.parse()
+                    .with_context(|| format!("invalid u32 for param {name}: {value}"))?;
+                data.extend_from_slice(&val.to_le_bytes());
+            }
+            ParamType::U128 => {
+                let val: u128 = value.parse()
+                    .with_context(|| format!("invalid u128 for param {name}: {value}"))?;
+                data.extend_from_slice(&val.to_le_bytes());
+            }
         }
     }
 
