@@ -7,14 +7,10 @@ edition = "2021"
 crate-type = ["cdylib", "lib"]
 
 [features]
-default = ["chain-zcash"]
+default = []
 alloc = []
 client = []
 debug = []
-# Gates the BLAKE2b dependency and the Zcash transparent (ZIP-244) chain
-# serializer. Disable to shrink the on-chain binary if you only need EVM
-# and Bitcoin signing.
-chain-zcash = ["dep:blake2"]
 
 [dependencies]
 quasar-lang = { git = "https://github.com/blueshift-gg/quasar" }
@@ -24,7 +20,6 @@ solana-instruction-view = "2"
 brine-ed25519 = { git = "https://github.com/ChewingGlass/brine-ed25519", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 tiny-keccak = { version = "2.0", default-features = false, features = ["keccak"] }
-blake2 = { version = "0.10", default-features = false, optional = true }
 
 [dev-dependencies]
 clear-wallet-client = { path = "client" }

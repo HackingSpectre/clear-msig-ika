@@ -28,6 +28,12 @@ solana-remote-wallet = "2"
 solana-sdk-ids = "2"
 solana-derivation-path = "2"
 solana-address = { version = "2", features = ["curve25519"] }
+# Umbrella crate kept for the session work that uses solana_sdk::{system_program,
+# pubkey::Pubkey, signer::Signer, instruction::*}. Upstream's "Cli using actual
+# generated types" commit dropped it in favor of split crates; we re-add it
+# here so the dWallet integration code (which predates that split) keeps
+# compiling without a sweeping rewrite.
+solana-sdk = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 bs58 = "0.5"
@@ -38,3 +44,27 @@ dialoguer = "0.11"
 anyhow = "1"
 dirs = "5"
 shellexpand = "3"
+hex = "0.4"
+tiny-keccak = { version = "2.0", features = ["keccak"] }
+k256 = { version = "0.13", features = ["ecdsa"] }
+ripemd = "0.1"
+bech32 = "0.11"
+# Used by `proposal execute --broadcast` to push signed EVM RLP envelopes
+# directly to a Sepolia / mainnet / chain-of-choice JSON-RPC endpoint after
+# the dwallet network returns the signature, so the CLI can take an
+# approved proposal all the way to a real on-chain transaction in one shot.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+# Ika dWallet integration (used by `wallet add-chain` and the chain-aware
+# `proposal execute`). Local async runtime created on demand so the rest of
+# the CLI stays sync.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+tonic = { version = "0.14", features = ["tls-native-roots"] }
+prost = "0.14"
+ika-grpc = { path = "../../ika-pre-alpha/crates/ika-grpc" }
+ika-dwallet-types = { path = "../../ika-pre-alpha/crates/ika-dwallet-types" }
+bcs = "0.1"
+
+# Vendored copy of the Quasar-generated clear-wallet client. Required because
+# the program uses `wincode` for instruction data, not raw byte appends.
+wincode = { version = "0.4", features = ["derive", "std"] }

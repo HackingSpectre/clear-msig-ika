@@ -1,8 +1,15 @@
-//! Bitcoin P2WPKH (single-input, single-output) BIP143 sighash.
+//! Bitcoin P2WPKH (single-input, single-output) BIP143 preimage builder.
 //!
-//! Builds the BIP143 sighash preimage for a single P2WPKH input spending to a
-//! single P2WPKH output, then returns sha256d(preimage). The dWallet signs
-//! that hash.
+//! Builds the BIP143 sighash **preimage** for a single P2WPKH input spending
+//! to a single P2WPKH output. This module no longer applies the final
+//! `sha256d` to the preimage — the on-chain `MessageApproval.message_hash`
+//! is computed by [`crate::chains::dispatch_sighash`] as `keccak256(preimage)`
+//! so that every chain stores the same kind of uniqueness key, and the
+//! dwallet network independently re-applies `sha256d` (via
+//! `hash_scheme = DoubleSHA256`) to produce the actual ECDSA signing digest
+//! off-chain. The inner `hashPrevouts` / `hashSequence` / `hashOutputs`
+//! commitments still use `sha256d` because they are part of the BIP143
+//! preimage definition itself, not a final hash on top of it.
 //!
 //! Spec: https://github.com/bitcoin/bips/blob/master/bip-0143.mediawiki
 //!
@@ -55,12 +62,20 @@ use super::{read_bytes20, read_bytes32, read_u64};
 
 pub const TX_TEMPLATE_LEN: usize = 16;
 
-pub fn build_sighash(
+/// BIP143 preimage length for one P2WPKH input + one P2WPKH output:
+/// 4 + 32 + 32 + 36 + 26 + 8 + 4 + 32 + 4 + 4 = 182 bytes.
+const PREIMAGE_LEN: usize = 182;
+
+pub fn build_preimage(
     intent: &Intent<'_>,
     params_data: &[u8],
     tx_template: &[u8],
-) -> Result<[u8; 32], ProgramError> {
+    out: &mut [u8],
+) -> Result<usize, ProgramError> {
     if tx_template.len() != TX_TEMPLATE_LEN {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    if out.len() < PREIMAGE_LEN {
         return Err(ProgramError::InvalidInstructionData);
     }
     let version = u32::from_le_bytes(tx_template[0..4].try_into().unwrap());
@@ -107,23 +122,21 @@ pub fn build_sighash(
     script_code[24] = 0x88; // OP_EQUALVERIFY
     script_code[25] = 0xac; // OP_CHECKSIG
 
-    // Assemble the BIP143 preimage.
-    //   4 + 32 + 32 + 36 + 26 + 8 + 4 + 32 + 4 + 4 = 182 bytes
-    let mut preimage = [0u8; 182];
+    // Assemble the BIP143 preimage directly into the caller's `out` buffer.
     let mut p = 0;
-    preimage[p..p + 4].copy_from_slice(&version.to_le_bytes()); p += 4;
-    preimage[p..p + 32].copy_from_slice(&hash_prevouts); p += 32;
-    preimage[p..p + 32].copy_from_slice(&hash_sequence); p += 32;
-    preimage[p..p + 36].copy_from_slice(&outpoint); p += 36;
-    preimage[p..p + 26].copy_from_slice(&script_code); p += 26;
-    preimage[p..p + 8].copy_from_slice(&prev_amount.to_le_bytes()); p += 8;
-    preimage[p..p + 4].copy_from_slice(&sequence.to_le_bytes()); p += 4;
-    preimage[p..p + 32].copy_from_slice(&hash_outputs); p += 32;
-    preimage[p..p + 4].copy_from_slice(&lock_time.to_le_bytes()); p += 4;
-    preimage[p..p + 4].copy_from_slice(&sighash_type.to_le_bytes()); p += 4;
-    debug_assert_eq!(p, preimage.len());
+    out[p..p + 4].copy_from_slice(&version.to_le_bytes()); p += 4;
+    out[p..p + 32].copy_from_slice(&hash_prevouts); p += 32;
+    out[p..p + 32].copy_from_slice(&hash_sequence); p += 32;
+    out[p..p + 36].copy_from_slice(&outpoint); p += 36;
+    out[p..p + 26].copy_from_slice(&script_code); p += 26;
+    out[p..p + 8].copy_from_slice(&prev_amount.to_le_bytes()); p += 8;
+    out[p..p + 4].copy_from_slice(&sequence.to_le_bytes()); p += 4;
+    out[p..p + 32].copy_from_slice(&hash_outputs); p += 32;
+    out[p..p + 4].copy_from_slice(&lock_time.to_le_bytes()); p += 4;
+    out[p..p + 4].copy_from_slice(&sighash_type.to_le_bytes()); p += 4;
+    debug_assert_eq!(p, PREIMAGE_LEN);
 
-    Ok(sha256d(&preimage))
+    Ok(PREIMAGE_LEN)
 }
 
 /// Bitcoin double-SHA256: `sha256(sha256(data))`.

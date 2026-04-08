@@ -307,6 +307,9 @@ pub mod bitcoin {
 }
 
 pub mod evm {
+    /// ERC-20 `transfer(address,uint256)` selector — `keccak256(...)[0..4]`.
+    pub const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
+
     /// EIP-1559 RLP-encoded transaction preimage (the bytes that get
     /// keccak256-hashed to produce the sighash).
     pub struct Tx1559 {
@@ -340,6 +343,54 @@ pub mod evm {
             rlp_list_header(&mut out, inner.len());
             out.extend_from_slice(&inner);
             out
+        }
+    }
+
+    /// ERC-20 transfer mirror — produces the same RLP bytes the on-chain
+    /// `clear_wallet::chains::evm::build_sighash_erc20` produces. Use this
+    /// off-chain to derive the dWallet `MessageApproval` PDA address and to
+    /// build the gRPC `Sign` request payload.
+    pub struct Erc20Transfer {
+        pub chain_id: u64,
+        pub nonce: u64,
+        pub max_priority_fee_per_gas: u64,
+        pub max_fee_per_gas: u64,
+        pub gas_limit: u64,
+        pub token_contract: [u8; 20],
+        pub recipient: [u8; 20],
+        pub amount: u128,
+    }
+
+    impl Erc20Transfer {
+        /// Solidity ABI-encoded calldata for `transfer(address,uint256)`:
+        /// `selector(4) || pad32(recipient) || u256_be(amount)` = 68 bytes.
+        pub fn calldata(&self) -> [u8; 68] {
+            let mut out = [0u8; 68];
+            out[0..4].copy_from_slice(&ERC20_TRANSFER_SELECTOR);
+            // address is left-padded to 32 bytes (12 leading zeros)
+            out[4 + 12..4 + 32].copy_from_slice(&self.recipient);
+            // uint256 amount: 16 leading zeros then u128 big-endian
+            out[4 + 32 + 16..4 + 32 + 32].copy_from_slice(&self.amount.to_be_bytes());
+            out
+        }
+
+        /// Lower this to a `Tx1559` (calling the token contract with value=0)
+        /// so we get a single RLP encoder.
+        pub fn as_tx1559(&self) -> Tx1559 {
+            Tx1559 {
+                chain_id: self.chain_id,
+                nonce: self.nonce,
+                max_priority_fee_per_gas: self.max_priority_fee_per_gas,
+                max_fee_per_gas: self.max_fee_per_gas,
+                gas_limit: self.gas_limit,
+                to: self.token_contract,
+                value: 0,
+                data: self.calldata().to_vec(),
+            }
+        }
+
+        pub fn rlp_preimage(&self) -> Vec<u8> {
+            self.as_tx1559().rlp_preimage()
         }
     }
 
@@ -385,6 +436,39 @@ pub mod evm {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn erc20_calldata_layout() {
+            // recipient = 0x4242...4242, amount = 1_000_000 (1 USDC at 6 decimals)
+            let tx = Erc20Transfer {
+                chain_id: 1,
+                nonce: 0,
+                max_priority_fee_per_gas: 1_500_000_000,
+                max_fee_per_gas: 30_000_000_000,
+                gas_limit: 65_000,
+                token_contract: [0xa0; 20],
+                recipient: [0x42; 20],
+                amount: 1_000_000,
+            };
+            let cd = tx.calldata();
+            // Selector
+            assert_eq!(&cd[0..4], &[0xa9, 0x05, 0x9c, 0xbb]);
+            // 12 zero bytes of left-padding before recipient
+            assert_eq!(&cd[4..4 + 12], &[0u8; 12]);
+            // Recipient bytes
+            assert_eq!(&cd[4 + 12..4 + 32], &[0x42; 20]);
+            // 16 zero bytes of left-padding before amount (u128 → u256)
+            assert_eq!(&cd[4 + 32..4 + 32 + 16], &[0u8; 16]);
+            // Amount big-endian: 1_000_000 = 0x0F4240
+            assert_eq!(&cd[4 + 32 + 16..], &1_000_000u128.to_be_bytes());
+            assert_eq!(cd.len(), 68);
+
+            // RLP envelope sanity: starts with 0x02, contains the calldata.
+            let preimage = tx.rlp_preimage();
+            assert_eq!(preimage[0], 0x02);
+            assert!(preimage.windows(4).any(|w| w == [0xa9, 0x05, 0x9c, 0xbb]));
+            assert!(preimage.windows(20).any(|w| w == [0xa0; 20]));
+        }
 
         #[test]
         fn rlp_minimal() {

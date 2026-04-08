@@ -1,0 +1,18 @@
+{
+  "chain": "evm_1559_erc20",
+  "tx_template": {
+    "evm_1559": {
+      "chain_id": 1,
+      "gas_limit": 65000,
+      "max_priority_fee_per_gas": 1500000000,
+      "max_fee_per_gas": 30000000000
+    }
+  },
+  "params": [
+    { "name": "nonce",          "type": "u64" },
+    { "name": "token_contract", "type": "bytes20" },
+    { "name": "recipient",      "type": "bytes20" },
+    { "name": "amount",         "type": "u128" }
+  ],
+  "template": "transfer {3} of token {1} to {2} (nonce {0})"
+}

@@ -13,7 +13,7 @@ pub struct IntentDefinitionJson {
     #[serde(default)]
     pub timelock_seconds: u32,
     /// Destination chain. Defaults to `solana` (local CPI execution). Set to
-    /// `evm_1559`, `bitcoin_p2wpkh`, or `zcash_transparent` for cross-chain
+    /// `evm_1559`, `evm_1559_erc20`, or `bitcoin_p2wpkh` for cross-chain
     /// signing via Ika `ika_sign`.
     #[serde(default)]
     pub chain: ChainKindJson,
@@ -41,7 +41,11 @@ pub enum ChainKindJson {
     #[serde(rename = "evm_1559")]
     Evm1559,
     BitcoinP2wpkh,
-    ZcashTransparent,
+    // Discriminant 3 is reserved for `zcash_transparent` (ZIP-244, NU5+).
+    // Not currently exposed — adding it requires the dwallet network to
+    // support a personalized BLAKE2b-256 `DWalletHashScheme` variant.
+    #[serde(rename = "evm_1559_erc20")]
+    Evm1559Erc20,
 }
 
 impl ChainKindJson {
@@ -50,12 +54,21 @@ impl ChainKindJson {
             Self::Solana => 0,
             Self::Evm1559 => 1,
             Self::BitcoinP2wpkh => 2,
-            Self::ZcashTransparent => 3,
+            // 3 reserved for ZcashTransparent
+            Self::Evm1559Erc20 => 4,
         }
     }
 
     pub fn is_remote(self) -> bool {
         !matches!(self, Self::Solana)
+    }
+
+    /// True if the chain serializer reads any bytes from `tx_template`.
+    /// All current remote-chain variants need a template; kept as a method
+    /// so future variants (e.g., a no-template attestation primitive) can
+    /// opt out without changing call sites.
+    pub fn needs_tx_template(self) -> bool {
+        self.is_remote()
     }
 }
 
@@ -80,13 +93,6 @@ pub enum TxTemplateJson {
         sequence: u32,
         sighash_type: u32,
     },
-    /// ZIP-244 transparent (NU5+): 16 bytes total.
-    ZcashTransparent {
-        version_group_id: u32,
-        consensus_branch_id: u32,
-        lock_time: u32,
-        expiry_height: u32,
-    },
 }
 
 impl TxTemplateJson {
@@ -109,23 +115,15 @@ impl TxTemplateJson {
                 out.extend_from_slice(&sighash_type.to_le_bytes());
                 out
             }
-            Self::ZcashTransparent { version_group_id, consensus_branch_id, lock_time, expiry_height } => {
-                let mut out = Vec::with_capacity(16);
-                out.extend_from_slice(&version_group_id.to_le_bytes());
-                out.extend_from_slice(&consensus_branch_id.to_le_bytes());
-                out.extend_from_slice(&lock_time.to_le_bytes());
-                out.extend_from_slice(&expiry_height.to_le_bytes());
-                out
-            }
         }
     }
 
     pub fn matches_chain(&self, chain: ChainKindJson) -> bool {
         matches!(
             (self, chain),
-            (Self::Evm1559 { .. }, ChainKindJson::Evm1559)
+            // Evm1559 tx_template is reused for both native and ERC-20 — same envelope.
+            (Self::Evm1559 { .. }, ChainKindJson::Evm1559 | ChainKindJson::Evm1559Erc20)
                 | (Self::BitcoinP2wpkh { .. }, ChainKindJson::BitcoinP2wpkh)
-                | (Self::ZcashTransparent { .. }, ChainKindJson::ZcashTransparent)
         )
     }
 }
@@ -255,7 +253,7 @@ impl IntentDefinitionJson {
         b.set_chain_kind(self.chain.as_u8());
 
         // Validate chain/tx_template consistency.
-        if self.chain.is_remote() {
+        if self.chain.needs_tx_template() {
             let tx = self.tx_template.as_ref()
                 .ok_or_else(|| format!("chain {:?} requires a tx_template field", self.chain))?;
             if !tx.matches_chain(self.chain) {
@@ -266,7 +264,10 @@ impl IntentDefinitionJson {
             }
             b.set_tx_template(&tx.encode());
         } else if self.tx_template.is_some() {
-            return Err("solana intents cannot have a tx_template".to_string());
+            return Err(format!(
+                "chain {:?} cannot have a tx_template",
+                self.chain
+            ));
         }
 
         for addr_str in &self.proposers {
@@ -476,11 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn test_zec_intent_from_file() {
-        let built = load_example("../../../examples/intents/zec_transfer.json").to_built().unwrap();
-        assert_eq!(built.chain_kind, 3); // ZcashTransparent
-        assert_eq!(built.tx_template_len, 16);
-        assert_eq!(built.params.len(), 6);
+    fn test_erc20_intent_from_file() {
+        let built = load_example("../../../examples/intents/erc20_transfer.json").to_built().unwrap();
+        assert_eq!(built.chain_kind, 4); // Evm1559Erc20
+        assert_eq!(built.tx_template_len, 32); // reuses Evm1559 envelope template
+        assert_eq!(built.params.len(), 4);
     }
 
     #[test]

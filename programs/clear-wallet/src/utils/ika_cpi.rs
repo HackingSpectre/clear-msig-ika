@@ -10,10 +10,14 @@ use quasar_lang::{
     prelude::*,
 };
 
-/// Seed for deriving the CPI authority PDA from the calling program.
-/// `find_program_address(&[CPI_AUTHORITY_SEED], &crate::ID)` yields the PDA
-/// that the dWallet program expects to see as `dwallet.authority` in
-/// program-mode signing.
+/// Seed for deriving the program-wide CPI authority PDA.
+///
+/// The dWallet program enforces a single canonical CPI authority per caller
+/// program — `find_program_address(&[CPI_AUTHORITY_SEED], caller_program_id)`.
+/// Wallet-scoping cannot happen here; per-wallet ownership of a dWallet is
+/// enforced one layer up via [`crate::state::dwallet_ownership::DwalletOwnership`],
+/// which records which clear-msig wallet first bound a given dWallet and
+/// rejects any later bind/sign attempt from a different wallet.
 pub const CPI_AUTHORITY_SEED: &[u8] = b"__ika_cpi_authority";
 
 // Instruction discriminators — must match `IkaDWalletInstructionDiscriminators`.
@@ -22,12 +26,12 @@ const IX_TRANSFER_OWNERSHIP: u8 = 24;
 
 /// CPI context for invoking Ika dWallet instructions.
 ///
-/// The clear-wallet program signs via its CPI authority PDA, which the
-/// dWallet program verifies through `verify_signer_or_cpi`.
+/// The clear-wallet program signs via its program-wide CPI authority PDA,
+/// which the dWallet program verifies through `verify_signer_or_cpi`.
 pub struct DWalletContext<'a> {
     /// The Ika dWallet program account.
     pub dwallet_program: &'a AccountView,
-    /// The CPI authority PDA derived from `crate::ID`.
+    /// The CPI authority PDA derived from `[CPI_AUTHORITY_SEED]`.
     pub cpi_authority: &'a AccountView,
     /// The clear-wallet program account (must be executable).
     pub caller_program: &'a AccountView,
@@ -168,3 +172,4 @@ impl<'a> DWalletContext<'a> {
         Ok(())
     }
 }
+

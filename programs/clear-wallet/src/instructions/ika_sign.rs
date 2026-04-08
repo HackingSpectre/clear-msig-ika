@@ -18,7 +18,9 @@ use quasar_lang::{prelude::*, sysvars::Sysvar as _};
 
 use crate::{
     chains::{dispatch_sighash, ChainKind},
+    instructions::bind_dwallet::{ClearWalletProgram, DWalletProgramInterface},
     state::{
+        dwallet_ownership::{DwalletOwnership, DWALLET_OWNERSHIP_SEED},
         ika_config::IkaConfig,
         intent::Intent,
         proposal::{Proposal, ProposalStatus},
@@ -47,6 +49,11 @@ pub struct IkaSign<'info> {
     /// IkaConfig PDA at `["ika_config", wallet, &[intent.chain_kind]]`.
     /// Decoded manually inside the handler — see `IkaConfig::read`.
     pub ika_config: &'info UncheckedAccount,
+    /// DwalletOwnership PDA at `["dwallet_owner", dwallet]`. Verified to
+    /// claim `self.wallet` — that's how a non-owning clear-msig wallet is
+    /// blocked from driving `ika_sign` against a dWallet bound by someone
+    /// else, even if it has its own IkaConfig pointing at the same dWallet.
+    pub dwallet_ownership: &'info UncheckedAccount,
     /// Verified to equal `ika_config.dwallet`.
     #[account(mut)]
     pub dwallet: &'info mut UncheckedAccount,
@@ -57,9 +64,9 @@ pub struct IkaSign<'info> {
     /// Clear-wallet's CPI authority PDA.
     pub cpi_authority: &'info UncheckedAccount,
     /// Clear-wallet program account (executable).
-    pub caller_program: &'info UncheckedAccount,
-    /// Ika dWallet program.
-    pub dwallet_program: &'info UncheckedAccount,
+    pub caller_program: &'info Program<ClearWalletProgram>,
+    /// Ika dWallet program (executable).
+    pub dwallet_program: &'info Interface<DWalletProgramInterface>,
     pub system_program: &'info Program<System>,
 }
 
@@ -122,20 +129,43 @@ impl<'info> IkaSign<'info> {
         let message_hash = dispatch_sighash(&self.intent, params_data, tx_template)?;
 
         // CPI Ika `approve_message`.
+        // Verify the program-wide CPI authority PDA (defense in depth).
+        let (expected_cpi_auth, _) = Address::find_program_address(
+            &[CPI_AUTHORITY_SEED],
+            &crate::ID,
+        );
+        require_keys_eq!(
+            *self.cpi_authority.address(),
+            expected_cpi_auth,
+            ProgramError::InvalidSeeds
+        );
+
+        // Verify the DwalletOwnership lock claims this wallet. The dwallet's
+        // on-chain authority is shared (program-wide CPI PDA), so we enforce
+        // per-wallet ownership here at the clear-wallet layer.
+        let wallet_addr = *self.wallet.address();
+        let dwallet_addr = *self.dwallet.address();
+        let (expected_ownership, _) = Address::find_program_address(
+            &[DWALLET_OWNERSHIP_SEED, dwallet_addr.as_ref()],
+            &crate::ID,
+        );
+        require_keys_eq!(
+            *self.dwallet_ownership.address(),
+            expected_ownership,
+            ProgramError::InvalidSeeds
+        );
+        // SAFETY: clear-wallet owns the DwalletOwnership PDA; no aliases.
+        let ownership_data = unsafe { self.dwallet_ownership.to_account_view().borrow_unchecked() };
+        let ownership = DwalletOwnership::read(ownership_data)?;
+        require_keys_eq!(ownership.wallet, wallet_addr, ProgramError::InvalidArgument);
+        require_keys_eq!(ownership.dwallet, dwallet_addr, ProgramError::InvalidArgument);
+
         let ctx = DWalletContext {
             dwallet_program: self.dwallet_program.to_account_view(),
             cpi_authority: self.cpi_authority.to_account_view(),
             caller_program: self.caller_program.to_account_view(),
             cpi_authority_bump: args.cpi_authority_bump,
         };
-        // Verify the CPI authority is the canonical PDA (defense in depth).
-        let (expected_cpi_auth, _) =
-            Address::find_program_address(&[CPI_AUTHORITY_SEED], &crate::ID);
-        require_keys_eq!(
-            *self.cpi_authority.address(),
-            expected_cpi_auth,
-            ProgramError::InvalidSeeds
-        );
 
         let user_pubkey: [u8; 32] = ika_config.user_pubkey.to_bytes();
         ctx.approve_message(

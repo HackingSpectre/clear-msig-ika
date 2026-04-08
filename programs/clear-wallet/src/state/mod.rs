@@ -9,3 +9,6 @@ pub use proposal::*;
 
 pub mod ika_config;
 pub use ika_config::*;
+
+pub mod dwallet_ownership;
+pub use dwallet_ownership::*;

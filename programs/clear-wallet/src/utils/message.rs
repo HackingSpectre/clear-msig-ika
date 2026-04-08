@@ -237,8 +237,14 @@ impl MessageBuilder {
                 let start = i + 1;
                 let end = bytes[start..].iter().position(|&b| b == b'}')
                     .ok_or(ProgramError::InvalidInstructionData)? + start;
-                let idx = parse_usize(&template[start..end])? as u8;
-                self.render_param(intent, params_data, idx)?;
+                let inner = &template[start..end];
+                // inner = "<idx>" or "<idx>:10^<digits>" (decimal-shift format spec)
+                let (idx_str, fmt) = match inner.as_bytes().iter().position(|&b| b == b':') {
+                    Some(pos) => (&inner[..pos], Some(&inner[pos + 1..])),
+                    None => (inner, None),
+                };
+                let idx = parse_usize(idx_str)? as u8;
+                self.render_param(intent, params_data, idx, fmt)?;
                 i = end + 1;
             } else {
                 self.push_bytes(&bytes[i..i + 1])?;
@@ -246,6 +252,55 @@ impl MessageBuilder {
             }
         }
         Ok(())
+    }
+
+    /// Render a u64 value scaled by `10^decimals` as a fixed-decimal string.
+    /// Trailing zeros after the decimal point are trimmed; integer-only values
+    /// produce no decimal point at all (e.g. `1000000000_u64` with decimals=9
+    /// renders as `"1"`, not `"1.0"`).
+    fn push_decimal_u64(&mut self, val: u64, decimals: u8) -> Result<(), ProgramError> {
+        if decimals == 0 {
+            return self.push_u64(val);
+        }
+        require!(decimals <= 19, ProgramError::InvalidInstructionData);
+
+        // 10^decimals — fits in u128 for decimals up to 19.
+        let mut scale: u128 = 1;
+        for _ in 0..decimals {
+            scale *= 10;
+        }
+
+        let v = val as u128;
+        let int_part = (v / scale) as u64;
+        let frac_part = v % scale;
+
+        self.push_u64(int_part)?;
+
+        if frac_part > 0 {
+            self.push_str(".")?;
+            // Fill `decimals` digits, leading-zero padded (so 0.0001 still has the zeros).
+            let mut buf = [0u8; 20];
+            let mut tmp = frac_part;
+            for i in (0..decimals as usize).rev() {
+                buf[i] = b'0' + (tmp % 10) as u8;
+                tmp /= 10;
+            }
+            // Trim trailing zeros: 0.50000 → 0.5
+            let mut end = decimals as usize;
+            while end > 0 && buf[end - 1] == b'0' {
+                end -= 1;
+            }
+            self.push_bytes(&buf[..end])?;
+        }
+        Ok(())
+    }
+
+    fn parse_decimal_spec(spec: &str) -> Result<u8, ProgramError> {
+        // Format spec: `10^<digits>`. Anything else is rejected.
+        let rest = spec.strip_prefix("10^").ok_or(ProgramError::InvalidInstructionData)?;
+        let n = parse_usize(rest)?;
+        require!(n <= 19, ProgramError::InvalidInstructionData);
+        Ok(n as u8)
     }
 
     fn push_u128(&mut self, val: u128) -> Result<(), ProgramError> {
@@ -257,14 +312,19 @@ impl MessageBuilder {
         self.push_bytes(&buf[pos..])
     }
 
-    fn render_param(&mut self, intent: &Intent<'_>, data: &[u8], idx: u8) -> Result<(), ProgramError> {
+    fn render_param(&mut self, intent: &Intent<'_>, data: &[u8], idx: u8, fmt: Option<&str>) -> Result<(), ProgramError> {
         let param = intent.params().get(idx as usize).ok_or(ProgramError::InvalidInstructionData)?;
         let offset = param_offset(intent, data, idx)?;
         match param.param_type {
             ParamType::Address => self.push_base58(&data[offset..offset + 32]),
             ParamType::U64 => {
                 let v = u64::from_le_bytes(data[offset..offset+8].try_into().map_err(|_| ProgramError::InvalidInstructionData)?);
-                self.push_u64(v)
+                if let Some(spec) = fmt {
+                    let decimals = Self::parse_decimal_spec(spec)?;
+                    self.push_decimal_u64(v, decimals)
+                } else {
+                    self.push_u64(v)
+                }
             }
             ParamType::I64 => {
                 let v = i64::from_le_bytes(data[offset..offset+8].try_into().map_err(|_| ProgramError::InvalidInstructionData)?);

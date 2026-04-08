@@ -132,9 +132,15 @@ fn render_template(template: &str, intent: &IntentAccount, params_data: &[u8]) -
             let start = i + 1;
             let end = bytes[start..].iter().position(|&b| b == b'}')
                 .ok_or(anyhow!("unclosed {{ in template"))? + start;
-            let idx: usize = template[start..end].parse()
-                .with_context(|| format!("invalid param index: {}", &template[start..end]))?;
-            result.push_str(&render_param(intent, params_data, idx)?);
+            let inner = &template[start..end];
+            // inner = "<idx>" or "<idx>:10^<digits>" (decimal-shift format spec)
+            let (idx_str, fmt) = match inner.find(':') {
+                Some(pos) => (&inner[..pos], Some(&inner[pos + 1..])),
+                None => (inner, None),
+            };
+            let idx: usize = idx_str.parse()
+                .with_context(|| format!("invalid param index: {idx_str}"))?;
+            result.push_str(&render_param(intent, params_data, idx, fmt)?);
             i = end + 1;
         } else {
             result.push(bytes[i] as char);
@@ -145,7 +151,48 @@ fn render_template(template: &str, intent: &IntentAccount, params_data: &[u8]) -
     Ok(result)
 }
 
-fn render_param(intent: &IntentAccount, params_data: &[u8], idx: usize) -> Result<String> {
+/// Parse a `10^N` format spec into the decimal shift `N`.
+fn parse_decimal_spec(spec: &str) -> Result<u8> {
+    let rest = spec.strip_prefix("10^")
+        .ok_or(anyhow!("invalid format spec '{spec}': only '10^N' is supported"))?;
+    let n: usize = rest.parse()
+        .with_context(|| format!("invalid decimal shift: {rest}"))?;
+    if n > 19 {
+        return Err(anyhow!("decimal shift too large (max 19): {n}"));
+    }
+    Ok(n as u8)
+}
+
+/// Render a u64 scaled by 10^decimals as a fixed-decimal string.
+/// Mirrors `MessageBuilder::push_decimal_u64` in the on-chain renderer.
+fn format_decimal_u64(val: u64, decimals: u8) -> String {
+    if decimals == 0 {
+        return val.to_string();
+    }
+    let scale: u128 = (0..decimals).fold(1u128, |a, _| a * 10);
+    let v = val as u128;
+    let int_part = (v / scale) as u64;
+    let frac_part = v % scale;
+    let mut s = int_part.to_string();
+    if frac_part > 0 {
+        s.push('.');
+        // Build leading-zero-padded fractional digits, then trim trailing zeros.
+        let mut buf = vec![b'0'; decimals as usize];
+        let mut tmp = frac_part;
+        for i in (0..decimals as usize).rev() {
+            buf[i] = b'0' + (tmp % 10) as u8;
+            tmp /= 10;
+        }
+        let mut end = decimals as usize;
+        while end > 0 && buf[end - 1] == b'0' {
+            end -= 1;
+        }
+        s.push_str(std::str::from_utf8(&buf[..end]).unwrap());
+    }
+    s
+}
+
+fn render_param(intent: &IntentAccount, params_data: &[u8], idx: usize, fmt: Option<&str>) -> Result<String> {
     let param = intent.params.get(idx)
         .ok_or(anyhow!("param index {idx} out of bounds"))?;
     let offset = param_offset(&intent.params, params_data, idx)?;
@@ -158,7 +205,13 @@ fn render_param(intent: &IntentAccount, params_data: &[u8], idx: usize) -> Resul
         }
         ParamType::U64 => {
             let bytes: [u8; 8] = params_data[offset..offset + 8].try_into()?;
-            Ok(u64::from_le_bytes(bytes).to_string())
+            let v = u64::from_le_bytes(bytes);
+            if let Some(spec) = fmt {
+                let decimals = parse_decimal_spec(spec)?;
+                Ok(format_decimal_u64(v, decimals))
+            } else {
+                Ok(v.to_string())
+            }
         }
         ParamType::I64 => {
             let bytes: [u8; 8] = params_data[offset..offset + 8].try_into()?;

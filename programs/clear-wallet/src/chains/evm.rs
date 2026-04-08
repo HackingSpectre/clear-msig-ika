@@ -1,13 +1,18 @@
-//! EVM EIP-1559 transaction sighash.
+//! EVM EIP-1559 transaction preimage builder.
 //!
-//! Builds a type-2 (EIP-1559) transaction from intent params + tx_template
-//! and returns the keccak256 of the RLP-encoded preimage. This hash is what
-//! the dWallet must sign for the resulting (r, s, v) to be a valid Ethereum
-//! signature.
+//! Builds the type-2 (EIP-1559) RLP-encoded **preimage** that an Ethereum
+//! verifier ec_recovers against. This module no longer hashes the preimage —
+//! the on-chain `MessageApproval.message_hash` is computed by
+//! [`crate::chains::dispatch_sighash`] as `keccak256(preimage)` so that every
+//! chain stores the same kind of uniqueness key, and the dwallet network
+//! independently re-applies `keccak256` (via `hash_scheme = Keccak256`) to
+//! produce the actual ECDSA signing digest off-chain.
 //!
 //! Per EIP-1559: signed payload is `0x02 || rlp([chain_id, nonce, max_priority_fee,
-//! max_fee, gas_limit, to, value, data, access_list])`. The sighash is
-//! `keccak256` of that whole byte string.
+//! max_fee, gas_limit, to, value, data, access_list])`. That's exactly what
+//! [`build_preimage`] writes into `out`; the consumer is responsible for
+//! hashing it (with `keccak256` for both the on-chain lookup and the
+//! signing digest, which for EVM happen to coincide).
 //!
 //! # Tx template format
 //!
@@ -36,19 +41,24 @@
 
 use quasar_lang::prelude::*;
 
-use crate::{state::intent::Intent, utils::keccak::keccak256};
-use super::{read_bytes20, read_param, read_u64};
+use crate::state::intent::Intent;
+use super::{read_bytes20, read_param, read_u128, read_u64};
+
+/// ERC-20 `transfer(address,uint256)` function selector.
+/// = `keccak256("transfer(address,uint256)")[0..4]`
+pub const ERC20_TRANSFER_SELECTOR: [u8; 4] = [0xa9, 0x05, 0x9c, 0xbb];
 
 const EIP1559_TYPE: u8 = 0x02;
 
 /// Tx template fixed length.
 pub const TX_TEMPLATE_LEN: usize = 32;
 
-pub fn build_sighash(
+pub fn build_preimage(
     intent: &Intent<'_>,
     params_data: &[u8],
     tx_template: &[u8],
-) -> Result<[u8; 32], ProgramError> {
+    out: &mut [u8],
+) -> Result<usize, ProgramError> {
     if tx_template.len() != TX_TEMPLATE_LEN {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -70,7 +80,9 @@ pub fn build_sighash(
         &data_param[1..1 + len]
     };
 
-    // Build the RLP list. Total upper bound:
+    // Build the RLP list into a local stack buffer first; we don't know the
+    // exact length until it's encoded, and the EIP-1559 envelope needs that
+    // length up front for its outer list header. Total upper bound:
     //   chain_id(9) + nonce(9) + max_prio(9) + max_fee(9) + gas(9) + to(21)
     //   + value(9) + data(<256 bytes typical) + access_list(1) + outer_hdr(3) ≈ 350 bytes
     let mut inner = [0u8; 1024];
@@ -87,14 +99,90 @@ pub fn build_sighash(
     // Empty access_list = empty list = 0xc0
     rlp_empty_list(&mut inner, &mut inner_len)?;
 
-    // Wrap inner as a list, then prepend the EIP-1559 type byte.
-    let mut buf = [0u8; 1024];
-    let mut buf_len = 0usize;
-    push(&mut buf, &mut buf_len, EIP1559_TYPE)?;
-    rlp_list_header(&mut buf, &mut buf_len, inner_len)?;
-    push_slice(&mut buf, &mut buf_len, &inner[..inner_len])?;
+    // Write the final envelope into the caller-provided output buffer:
+    //   0x02 || rlp_list_header(inner_len) || inner
+    let mut out_len = 0usize;
+    push(out, &mut out_len, EIP1559_TYPE)?;
+    rlp_list_header(out, &mut out_len, inner_len)?;
+    push_slice(out, &mut out_len, &inner[..inner_len])?;
 
-    Ok(keccak256(&buf[..buf_len]))
+    Ok(out_len)
+}
+
+/// Build the EIP-1559 preimage for an ERC-20 `transfer(address,uint256)` call.
+///
+/// Wraps the same envelope as [`build_preimage`], but constructs the calldata
+/// from typed (recipient, amount) params instead of taking opaque bytes —
+/// so approvers see "transfer X tokens to Y" in the clear-signing template
+/// and the on-chain code is the only thing that can produce the actual
+/// calldata bytes. There's no path for a relayer to substitute different
+/// calldata between approval and signing.
+///
+/// # Tx template format
+///
+/// Same as [`build_preimage`] (32 bytes): chain_id(8) + gas_limit(8)
+/// + max_priority_fee(8) + max_fee(8). All u64 LE.
+///
+/// # Param schema
+///
+///   param[0] = nonce          : U64
+///   param[1] = token_contract : Bytes20  (the ERC-20 contract address)
+///   param[2] = recipient      : Bytes20  (transfer destination)
+///   param[3] = amount         : U128     (token amount in smallest unit)
+///
+/// # Calldata layout
+///
+///   selector(4) || pad32(recipient) || u256_be(amount)  = 68 bytes
+///
+/// `pad32(recipient)` is the 20-byte address left-padded with 12 zero bytes
+/// (per Solidity ABI encoding for `address`).
+pub fn build_preimage_erc20(
+    intent: &Intent<'_>,
+    params_data: &[u8],
+    tx_template: &[u8],
+    out: &mut [u8],
+) -> Result<usize, ProgramError> {
+    if tx_template.len() != TX_TEMPLATE_LEN {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    let chain_id = u64::from_le_bytes(tx_template[0..8].try_into().unwrap());
+    let gas_limit = u64::from_le_bytes(tx_template[8..16].try_into().unwrap());
+    let max_priority_fee = u64::from_le_bytes(tx_template[16..24].try_into().unwrap());
+    let max_fee = u64::from_le_bytes(tx_template[24..32].try_into().unwrap());
+
+    let nonce = read_u64(intent, params_data, 0)?;
+    let token_contract = read_bytes20(intent, params_data, 1)?;
+    let recipient = read_bytes20(intent, params_data, 2)?;
+    let amount = read_u128(intent, params_data, 3)?;
+
+    // ERC-20 calldata: selector(4) || pad32(recipient)(32) || u256_be(amount)(32)
+    let mut calldata = [0u8; 68];
+    calldata[0..4].copy_from_slice(&ERC20_TRANSFER_SELECTOR);
+    // pad32 left-pads the 20-byte address with 12 zero bytes (Solidity ABI)
+    calldata[4 + 12..4 + 32].copy_from_slice(&recipient);
+    // u256_be amount: 16 zero bytes then 16 bytes of u128 big-endian
+    calldata[4 + 32 + 16..4 + 32 + 32].copy_from_slice(&amount.to_be_bytes());
+
+    // Same EIP-1559 envelope as native: to=token_contract, value=0, data=calldata
+    let mut inner = [0u8; 1024];
+    let mut inner_len = 0usize;
+    rlp_u64(&mut inner, &mut inner_len, chain_id)?;
+    rlp_u64(&mut inner, &mut inner_len, nonce)?;
+    rlp_u64(&mut inner, &mut inner_len, max_priority_fee)?;
+    rlp_u64(&mut inner, &mut inner_len, max_fee)?;
+    rlp_u64(&mut inner, &mut inner_len, gas_limit)?;
+    rlp_bytes(&mut inner, &mut inner_len, &token_contract)?;
+    rlp_u64(&mut inner, &mut inner_len, 0)?; // value = 0 for token transfers
+    rlp_bytes(&mut inner, &mut inner_len, &calldata)?;
+    rlp_empty_list(&mut inner, &mut inner_len)?;
+
+    let mut out_len = 0usize;
+    push(out, &mut out_len, EIP1559_TYPE)?;
+    rlp_list_header(out, &mut out_len, inner_len)?;
+    push_slice(out, &mut out_len, &inner[..inner_len])?;
+
+    Ok(out_len)
 }
 
 // --- Minimal RLP encoder ---

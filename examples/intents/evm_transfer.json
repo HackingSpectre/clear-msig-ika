@@ -14,5 +14,5 @@
     { "name": "value_wei", "type": "u64" },
     { "name": "data",      "type": "string" }
   ],
-  "template": "send {2} wei to 0x{1} (nonce {0})"
+  "template": "send {2} wei to {1} (nonce {0})"
 }
