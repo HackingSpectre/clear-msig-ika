@@ -853,7 +853,7 @@ dependencies = [
  "dialoguer 0.11.0",
  "dirs 5.0.1",
  "ed25519-dalek 2.2.0",
- "quasar-lang",
+ "quasar-lang 0.0.0 (git+https://github.com/blueshift-gg/quasar?branch=fix%2Fsigner-check-and-wincode-versions)",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -882,7 +882,7 @@ dependencies = [
  "bs58",
  "clear-wallet-client",
  "ed25519-dalek 2.2.0",
- "quasar-lang",
+ "quasar-lang 0.0.0 (git+https://github.com/blueshift-gg/quasar?branch=master)",
  "quasar-svm",
  "rand 0.8.5",
  "sha2 0.10.9",
@@ -899,7 +899,7 @@ version = "0.1.0"
 dependencies = [
  "bs58",
  "clear-wallet",
- "quasar-lang",
+ "quasar-lang 0.0.0 (git+https://github.com/blueshift-gg/quasar?branch=master)",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3028,13 +3028,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "quasar-derive"
+version = "0.0.0"
+source = "git+https://github.com/blueshift-gg/quasar?branch=master#0e7559496b86aebe300254d90baa7210672c1cbf"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "quasar-lang"
 version = "0.0.0"
 source = "git+https://github.com/blueshift-gg/quasar?branch=fix%2Fsigner-check-and-wincode-versions#2d5f2d84ff3c13794958f64c22721388280f4ae3"
 dependencies = [
  "const-crypto",
- "quasar-derive",
- "quasar-pod",
+ "quasar-derive 0.0.0 (git+https://github.com/blueshift-gg/quasar?branch=fix%2Fsigner-check-and-wincode-versions)",
+ "quasar-pod 0.0.0 (git+https://github.com/blueshift-gg/quasar?branch=fix%2Fsigner-check-and-wincode-versions)",
+ "solana-account-view",
+ "solana-address 2.6.0",
+ "solana-define-syscall 5.0.0",
+ "solana-instruction 3.4.0",
+ "solana-instruction-view",
+ "solana-program-error 3.0.1",
+ "solana-program-log",
+ "wincode 0.4.9",
+]
+
+[[package]]
+name = "quasar-lang"
+version = "0.0.0"
+source = "git+https://github.com/blueshift-gg/quasar?branch=master#0e7559496b86aebe300254d90baa7210672c1cbf"
+dependencies = [
+ "const-crypto",
+ "quasar-derive 0.0.0 (git+https://github.com/blueshift-gg/quasar?branch=master)",
+ "quasar-pod 0.0.0 (git+https://github.com/blueshift-gg/quasar?branch=master)",
  "solana-account-view",
  "solana-address 2.6.0",
  "solana-define-syscall 5.0.0",
@@ -3049,6 +3079,14 @@ dependencies = [
 name = "quasar-pod"
 version = "0.0.0"
 source = "git+https://github.com/blueshift-gg/quasar?branch=fix%2Fsigner-check-and-wincode-versions#2d5f2d84ff3c13794958f64c22721388280f4ae3"
+dependencies = [
+ "wincode 0.4.9",
+]
+
+[[package]]
+name = "quasar-pod"
+version = "0.0.0"
+source = "git+https://github.com/blueshift-gg/quasar?branch=master#0e7559496b86aebe300254d90baa7210672c1cbf"
 dependencies = [
  "wincode 0.4.9",
 ]

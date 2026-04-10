@@ -1,6 +1,6 @@
 use quasar_lang::prelude::*;
 
-use crate::state::proposal::{Proposal, ProposalStatus};
+use crate::{error::WalletError, state::proposal::{Proposal, ProposalStatus}};
 
 #[derive(Accounts)]
 pub struct CleanupProposal<'info> {
@@ -9,7 +9,7 @@ pub struct CleanupProposal<'info> {
         close = rent_refund,
         constraint = proposal.status == ProposalStatus::Executed
             || proposal.status == ProposalStatus::Cancelled
-            @ ProgramError::InvalidArgument
+            @ WalletError::ProposalNotFinalized
     )]
     pub proposal: Account<Proposal<'info>>,
     #[account(mut)]

@@ -2,6 +2,8 @@
 
 use quasar_lang::prelude::*;
 
+mod error;
+pub use error::*;
 mod instructions;
 use instructions::*;
 mod state;
@@ -49,9 +51,16 @@ pub mod clear_wallet {
         signature: [u8; 64],
         params_data: &[u8],
     ) -> Result<(), ProgramError> {
-        ctx.accounts.propose(proposal_index, ProposeArgs {
-            expiry, proposer_pubkey: &proposer_pubkey, signature: &signature, params_data,
-        }, &ctx.bumps)
+        ctx.accounts.propose(
+            proposal_index,
+            ProposeArgs {
+                expiry,
+                proposer_pubkey: &proposer_pubkey,
+                signature: &signature,
+                params_data,
+            },
+            &ctx.bumps,
+        )
     }
 
     #[instruction(discriminator = 2)]
@@ -83,10 +92,9 @@ pub mod clear_wallet {
     }
 
     #[instruction(discriminator = 4)]
-    pub fn execute(
-        ctx: CtxWithRemaining<Execute>,
-    ) -> Result<(), ProgramError> {
-        ctx.accounts.execute(&ctx.bumps, ctx.remaining_accounts_passthrough())
+    pub fn execute(ctx: CtxWithRemaining<Execute>) -> Result<(), ProgramError> {
+        ctx.accounts
+            .execute(&ctx.bumps, ctx.remaining_accounts_passthrough())
     }
 
     #[instruction(discriminator = 5)]

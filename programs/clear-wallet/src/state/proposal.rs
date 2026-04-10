@@ -46,14 +46,14 @@ impl Proposal<'_> {
     }
 
     pub fn set_approval(&mut self, idx: u8) {
-        let mask = 1u16 << idx;
-        self.cancellation_bitmap = PodU16::from(self.cancellation_bitmap.get() & !mask);
-        self.approval_bitmap = PodU16::from(self.approval_bitmap.get() | mask);
+        let mask: PodU16 = (1u16 << idx).into();
+        self.cancellation_bitmap &= !mask;
+        self.approval_bitmap |= mask;
     }
 
     pub fn set_cancellation(&mut self, idx: u8) {
-        let mask = 1u16 << idx;
-        self.approval_bitmap = PodU16::from(self.approval_bitmap.get() & !mask);
-        self.cancellation_bitmap = PodU16::from(self.cancellation_bitmap.get() | mask);
+        let mask: PodU16 = (1u16 << idx).into();
+        self.approval_bitmap &= !mask;
+        self.cancellation_bitmap |= mask;
     }
 }

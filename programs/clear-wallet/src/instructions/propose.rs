@@ -1,6 +1,7 @@
 use quasar_lang::{prelude::*, sysvars::Sysvar as _};
 
 use crate::{
+    error::WalletError,
     state::{
         intent::Intent,
         proposal::{Proposal, ProposalInner, ProposalStatus},
@@ -18,7 +19,7 @@ pub struct Propose<'info> {
     #[account(
         mut,
         has_one = wallet,
-        constraint = intent.is_approved() @ ProgramError::InvalidArgument,
+        constraint = intent.is_approved() @ WalletError::IntentNotApproved,
     )]
     pub intent: Account<Intent<'info>>,
     #[account(
@@ -48,14 +49,14 @@ impl<'info> Propose<'info> {
         // Verify the client-provided proposal_index matches the wallet's current index
         require!(
             proposal_index == self.wallet.proposal_index.get(),
-            ProgramError::InvalidArgument
+            WalletError::InvalidProposalIndex
         );
 
         let clock = Clock::get()?;
-        require!(args.expiry > clock.unix_timestamp.get(), ProgramError::InvalidArgument);
+        require!(args.expiry > clock.unix_timestamp.get(), WalletError::Expired);
 
         let proposer_addr = Address::new_from_array(*args.proposer_pubkey);
-        require!(self.intent.is_proposer(&proposer_addr), ProgramError::MissingRequiredSignature);
+        require!(self.intent.is_proposer(&proposer_addr), WalletError::NotProposer);
 
         if self.intent.intent_type == crate::state::intent::IntentType::Custom {
             self.intent.validate_param_constraints(args.params_data)?;
@@ -69,7 +70,7 @@ impl<'info> Propose<'info> {
         )?;
 
         brine_ed25519::sig_verify(args.proposer_pubkey, args.signature, msg_buf.as_bytes())
-            .map_err(|_| ProgramError::InvalidArgument)?;
+            .map_err(|_| WalletError::InvalidSignature)?;
 
         self.proposal.set_inner(ProposalInner {
             wallet: *self.wallet.address(),
@@ -86,10 +87,10 @@ impl<'info> Propose<'info> {
             params_data: args.params_data,
         }, self.payer.to_account_view(), None)?;
 
-        let count = self.intent.active_proposal_count.get();
-        let new_count = count.checked_add(1).ok_or(ProgramError::InvalidArgument)?;
-        self.intent.active_proposal_count = PodU16::from(new_count);
-        self.wallet.proposal_index = PodU64::from(proposal_index + 1);
+        self.intent.active_proposal_count = self.intent.active_proposal_count
+            .checked_add(1)
+            .ok_or(WalletError::TooManyActiveProposals)?;
+        self.wallet.proposal_index += 1;
         Ok(())
     }
 }

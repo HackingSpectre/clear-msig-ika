@@ -1,6 +1,6 @@
 use quasar_lang::prelude::*;
 
-use crate::utils::definition::*;
+use crate::{error::WalletError, utils::definition::*};
 
 /// Raw byte offsets in the Intent account data for fields that need
 /// direct access from remaining_accounts (where quasar casting isn't available).
@@ -158,12 +158,12 @@ impl Intent<'_> {
                     if param.constraint_type == ConstraintType::LessThanU64 {
                         require!(
                             val < param.constraint_value.get(),
-                            ProgramError::InvalidArgument
+                            WalletError::ParamConstraintViolation
                         );
                     } else if param.constraint_type == ConstraintType::GreaterThanU64 {
                         require!(
                             val > param.constraint_value.get(),
-                            ProgramError::InvalidArgument
+                            WalletError::ParamConstraintViolation
                         );
                     }
                     offset += 8;
