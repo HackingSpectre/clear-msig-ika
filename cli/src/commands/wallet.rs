@@ -171,20 +171,20 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                 .collect::<Result<_>>()?;
 
             let payer_pubkey = solana_sdk::signer::Signer::pubkey(&config.payer);
-            let ix = crate::instructions::create_wallet(
-                payer_pubkey,
-                name_hash_pubkey,
+            let ix = crate::instructions::create_wallet(crate::instructions::CreateWalletArgs {
+                payer: payer_pubkey,
+                name_hash: name_hash_pubkey,
                 wallet,
-                Pubkey::new_from_array(add_intent_addr.to_bytes()),
-                Pubkey::new_from_array(remove_intent_addr.to_bytes()),
-                Pubkey::new_from_array(update_intent_addr.to_bytes()),
-                &name,
+                add_intent: Pubkey::new_from_array(add_intent_addr.to_bytes()),
+                remove_intent: Pubkey::new_from_array(remove_intent_addr.to_bytes()),
+                update_intent: Pubkey::new_from_array(update_intent_addr.to_bytes()),
+                name: &name,
                 threshold,
-                cancellation_threshold,
+                cancel_threshold: cancellation_threshold,
                 timelock,
-                &proposer_pubkeys,
-                &approver_pubkeys,
-            );
+                proposers: &proposer_pubkeys,
+                approvers: &approver_pubkeys,
+            });
 
             let client = rpc::client(config);
             let sig = rpc::send_instruction(&client, config, ix)?;
@@ -229,9 +229,10 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                 .with_context(|| "dWallet program coordinator not initialized")?;
             eprintln!("✓ dWallet program ready");
 
-            let (curve, _algo, _hash_scheme) = ika::signing_params(chain_kind, force_curve25519);
-            let curve_byte = ika::curve_byte(curve);
-            eprintln!("→ Using curve: {curve:?} (byte={curve_byte})");
+            let (curve, _algo, scheme) = ika::signing_params(chain_kind, force_curve25519);
+            let curve_val = ika::curve_u16(curve);
+            let scheme_u16 = scheme as u16;
+            eprintln!("→ Using curve: {curve:?} (u16={curve_val})");
 
             // 1. DKG (or skip if BYO dWallet).
             //
@@ -248,7 +249,7 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                 let pk = parse_hex(&hex_pk)?;
                 eprintln!("→ Using existing dWallet pubkey ({} bytes)", pk.len());
                 let (target_dwallet_pda, _) =
-                    ika::dwallet_pda(&dwallet_program_pk, curve_byte, &pk);
+                    ika::dwallet_pda(&dwallet_program_pk, curve_val, &pk);
 
                 // Resolve the 32-byte Ika session id. Prefer the explicit
                 // `--existing-dwallet-addr` if provided; otherwise scan the
@@ -307,16 +308,16 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                 (addr, pk)
             } else {
                 eprintln!("→ Running DKG via gRPC ({grpc_url})...");
-                let (addr, pk) = ika::dkg(config, &grpc_url, curve)
+                let dkg_result = ika::dkg(config, &grpc_url, curve)
                     .with_context(|| "Ika DKG failed")?;
                 eprintln!("✓ DKG complete");
-                eprintln!("  → dWallet address: {}", hex_encode(&addr));
-                eprintln!("  → dWallet pubkey:  {}", hex_encode(&pk));
-                (addr, pk)
+                eprintln!("  → dWallet address: {}", hex_encode(&dkg_result.dwallet_addr));
+                eprintln!("  → dWallet pubkey:  {}", hex_encode(&dkg_result.public_key));
+                (dkg_result.dwallet_addr, dkg_result.public_key)
             };
 
             // 2. Resolve the dWallet PDA on-chain (mock auto-commits within ~5s).
-            let (dwallet_pda, _) = ika::dwallet_pda(&dwallet_program_pk, curve_byte, &dwallet_public_key);
+            let (dwallet_pda, _) = ika::dwallet_pda(&dwallet_program_pk, curve_val, &dwallet_public_key);
             ika::poll_until(
                 &client,
                 &dwallet_pda,
@@ -380,7 +381,7 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                 dwallet_program_pk,
                 chain_kind,
                 user_pubkey,
-                /*signature_scheme=*/ 0,
+                scheme_u16,
                 cpi_auth_bump,
             );
             let bind_sig = rpc::send_instruction(&client, config, bind_ix)

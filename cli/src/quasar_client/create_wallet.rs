@@ -1,8 +1,7 @@
-use std::vec::Vec;
 use solana_address::Address;
 use solana_instruction_v3::{AccountMeta, Instruction};
 use super::ID;
-use quasar_lang::client::{DynBytes};
+use quasar_lang::client::{DynBytes, DynVec};
 
 pub struct CreateWalletInstruction {
     pub payer: Address,
@@ -15,14 +14,14 @@ pub struct CreateWalletInstruction {
     pub approval_threshold: u8,
     pub cancellation_threshold: u8,
     pub timelock_seconds: u32,
-    pub num_proposers: u8,
     pub name: DynBytes,
-    pub remaining_accounts: Vec<AccountMeta>,
+    pub proposers: DynVec<[u8; 32]>,
+    pub approvers: DynVec<[u8; 32]>,
 }
 
 impl From<CreateWalletInstruction> for Instruction {
     fn from(ix: CreateWalletInstruction) -> Instruction {
-        let mut accounts = vec![
+        let accounts = vec![
             AccountMeta::new(ix.payer, true),
             AccountMeta::new_readonly(ix.name_hash, false),
             AccountMeta::new(ix.wallet, false),
@@ -31,13 +30,13 @@ impl From<CreateWalletInstruction> for Instruction {
             AccountMeta::new(ix.update_intent, false),
             AccountMeta::new_readonly(ix.system_program, false),
         ];
-        accounts.extend(ix.remaining_accounts);
         let mut data = vec![0];
         wincode::serialize_into(&mut data, &ix.approval_threshold).unwrap();
         wincode::serialize_into(&mut data, &ix.cancellation_threshold).unwrap();
         wincode::serialize_into(&mut data, &ix.timelock_seconds).unwrap();
-        wincode::serialize_into(&mut data, &ix.num_proposers).unwrap();
         wincode::serialize_into(&mut data, &ix.name).unwrap();
+        wincode::serialize_into(&mut data, &ix.proposers).unwrap();
+        wincode::serialize_into(&mut data, &ix.approvers).unwrap();
         Instruction {
             program_id: ID,
             accounts,

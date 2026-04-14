@@ -202,7 +202,7 @@ pub struct IkaConfigAccount {
     pub dwallet: String,
     pub user_pubkey: String,
     pub chain_kind: u8,
-    pub signature_scheme: u8,
+    pub signature_scheme: u16,
     pub bump: u8,
 }
 
@@ -374,7 +374,7 @@ mod tests {
 }
 
 pub fn parse_ika_config(data: &[u8]) -> Result<IkaConfigAccount> {
-    if data.len() < 100 || data[0] != 4 {
+    if data.len() < 101 || data[0] != 4 {
         return Err(anyhow!(
             "not an IkaConfig account (discriminator={})",
             data.first().unwrap_or(&0)
@@ -385,12 +385,16 @@ pub fn parse_ika_config(data: &[u8]) -> Result<IkaConfigAccount> {
     let dwallet = read_address(data, &mut offset)?;
     let user_pubkey_bytes = data.get(offset..offset + 32)
         .ok_or(anyhow!("unexpected end of data reading user_pubkey"))?;
-    // user_pubkey is curve-native bytes (Curve25519/secp256k1), not a Solana address.
-    // We hex-encode for display so it's unambiguous which is which.
     let user_pubkey = hex_encode(user_pubkey_bytes);
     offset += 32;
     let chain_kind = read_u8(data, &mut offset)?;
-    let signature_scheme = read_u8(data, &mut offset)?;
+    let signature_scheme = u16::from_le_bytes(
+        data.get(offset..offset + 2)
+            .ok_or(anyhow!("unexpected end of data reading signature_scheme"))?
+            .try_into()
+            .unwrap(),
+    );
+    offset += 2;
     let bump = read_u8(data, &mut offset)?;
     Ok(IkaConfigAccount {
         wallet, dwallet, user_pubkey, chain_kind, signature_scheme, bump,

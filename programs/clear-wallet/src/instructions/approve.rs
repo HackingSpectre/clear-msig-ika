@@ -1,23 +1,29 @@
-use {
-    crate::state::{
+use quasar_lang::{prelude::*, sysvars::Sysvar as _};
+
+use crate::{
+    error::WalletError,
+    state::{
         intent::Intent,
         proposal::{Proposal, ProposalStatus},
         wallet::ClearWallet,
     },
-    crate::utils::message::{MessageBuilder, MessageContext},
-    quasar_lang::{prelude::*, sysvars::Sysvar as _},
+    utils::message::{MessageBuilder, MessageContext},
 };
 
 #[derive(Accounts)]
 pub struct Approve<'info> {
     pub wallet: Account<ClearWallet<'info>>,
-    #[account(mut)]
+    #[account(
+        mut,
+        has_one = wallet,
+        constraint = intent.is_approved() @ WalletError::IntentNotApproved,
+    )]
     pub intent: Account<Intent<'info>>,
     #[account(
         mut,
         has_one = wallet,
         has_one = intent,
-        constraint = proposal.status == ProposalStatus::Active @ ProgramError::InvalidArgument
+        constraint = proposal.status == ProposalStatus::Active @ WalletError::ProposalNotActive
     )]
     pub proposal: Account<Proposal<'info>>,
 }
@@ -31,18 +37,26 @@ pub struct ApproveArgs<'a> {
 impl<'info> Approve<'info> {
     pub fn approve(&mut self, args: ApproveArgs<'_>) -> Result<(), ProgramError> {
         let clock = Clock::get()?;
-        require!(args.expiry > clock.unix_timestamp.get(), ProgramError::InvalidArgument);
+        require!(
+            args.expiry > clock.unix_timestamp.get(),
+            WalletError::Expired
+        );
 
         let approvers = self.intent.approvers();
-        let approver_addr = approvers.get(args.approver_index as usize)
-            .ok_or(ProgramError::InvalidArgument)?;
+        let approver_addr = approvers
+            .get(args.approver_index as usize)
+            .ok_or(WalletError::InvalidMemberIndex)?;
 
-        require!(!self.proposal.has_approved_by_index(args.approver_index), ProgramError::InvalidArgument);
+        require!(
+            !self.proposal.has_approved_by_index(args.approver_index),
+            WalletError::AlreadyApproved
+        );
 
         let mut msg_buf = MessageBuilder::new();
         msg_buf.build_message_for_intent(
             &MessageContext {
-                expiry: args.expiry, action: "approve",
+                expiry: args.expiry,
+                action: "approve",
                 wallet_name: self.wallet.name(),
                 proposal_index: self.proposal.proposal_index.get(),
             },
@@ -51,12 +65,12 @@ impl<'info> Approve<'info> {
         )?;
 
         brine_ed25519::sig_verify(approver_addr.as_ref(), args.signature, msg_buf.as_bytes())
-            .map_err(|_| ProgramError::InvalidArgument)?;
+            .map_err(|_| WalletError::InvalidSignature)?;
 
         self.proposal.set_approval(args.approver_index);
         if self.proposal.approval_count() >= self.intent.approval_threshold {
             self.proposal.status = ProposalStatus::Approved;
-            self.proposal.approved_at = PodI64::from(clock.unix_timestamp.get());
+            self.proposal.approved_at = clock.unix_timestamp;
         }
         Ok(())
     }

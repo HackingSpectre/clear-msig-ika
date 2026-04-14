@@ -95,7 +95,7 @@ pub struct BindDwallet<'info> {
 pub struct BindDwalletArgs {
     pub chain_kind: u8,
     pub user_pubkey: [u8; 32],
-    pub signature_scheme: u8,
+    pub signature_scheme: u16,
     pub cpi_authority_bump: u8,
 }
 
@@ -210,7 +210,7 @@ impl<'info> BindDwallet<'info> {
             + 32       // dwallet
             + 32       // user_pubkey
             + 1        // chain_kind
-            + 1        // signature_scheme
+            + 2        // signature_scheme (u16)
             + 1; // bump
         let rent = Rent::get()?;
         let lamports = rent.try_minimum_balance(space)?;
@@ -237,14 +237,15 @@ impl<'info> BindDwallet<'info> {
             &mut *(self.ika_config as *mut UncheckedAccount as *mut AccountView)
         };
         let ptr = cfg_view.data_mut_ptr();
+        let scheme_bytes = args.signature_scheme.to_le_bytes();
         unsafe {
             *ptr = 4; // IkaConfig discriminator
             core::ptr::copy_nonoverlapping(wallet_addr.as_ref().as_ptr(), ptr.add(1), 32);
             core::ptr::copy_nonoverlapping(dwallet_addr.as_ref().as_ptr(), ptr.add(33), 32);
             core::ptr::copy_nonoverlapping(args.user_pubkey.as_ptr(), ptr.add(65), 32);
             *ptr.add(97) = args.chain_kind;
-            *ptr.add(98) = args.signature_scheme;
-            *ptr.add(99) = cfg_bump;
+            core::ptr::copy_nonoverlapping(scheme_bytes.as_ptr(), ptr.add(98), 2);
+            *ptr.add(100) = cfg_bump;
         }
 
         // CPI Ika `transfer_ownership` to confirm/refresh the dWallet's

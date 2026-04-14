@@ -14,7 +14,7 @@ pub struct BindDwalletInstruction {
     pub system_program: Address,
     pub chain_kind: u8,
     pub user_pubkey: [u8; 32],
-    pub signature_scheme: u8,
+    pub signature_scheme: u16,
     pub cpi_authority_bump: u8,
 }
 

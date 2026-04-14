@@ -4,7 +4,7 @@
 //! locally, `ika_sign`:
 //!
 //!   1. Verifies the proposal is Approved and timelock-elapsed.
-//!   2. Looks up the (wallet, chain_kind) → dWallet binding from `IkaConfig`.
+//!   2. Looks up the (wallet, chain_kind) -> dWallet binding from `IkaConfig`.
 //!   3. Builds the destination-chain transaction sighash from the intent's
 //!      params + tx_template via `crate::chains::dispatch_sighash`.
 //!   4. CPIs Ika `approve_message` so the dWallet network will produce a
@@ -61,6 +61,8 @@ pub struct IkaSign<'info> {
     /// expected address; bump is supplied as an arg.
     #[account(mut)]
     pub message_approval: &'info mut UncheckedAccount,
+    /// DWalletCoordinator PDA (required by Ika's `approve_message` for epoch).
+    pub coordinator: &'info UncheckedAccount,
     /// Clear-wallet's CPI authority PDA.
     pub cpi_authority: &'info UncheckedAccount,
     /// Clear-wallet program account (executable).
@@ -168,12 +170,17 @@ impl<'info> IkaSign<'info> {
         };
 
         let user_pubkey: [u8; 32] = ika_config.user_pubkey.to_bytes();
+        // message_metadata_digest is all zeros for now (no per-scheme metadata
+        // needed for the chains we currently support).
+        let message_metadata_digest = [0u8; 32];
         ctx.approve_message(
+            self.coordinator.to_account_view(),
             self.message_approval.to_account_view(),
             self.dwallet.to_account_view(),
             self.payer.to_account_view(),
             self.system_program.to_account_view(),
             message_hash,
+            message_metadata_digest,
             user_pubkey,
             ika_config.signature_scheme,
             args.message_approval_bump,

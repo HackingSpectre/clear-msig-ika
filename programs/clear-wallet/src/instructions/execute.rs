@@ -1,11 +1,12 @@
 use quasar_lang::{
-    cpi::{CpiAccount, InstructionAccount, InstructionView, Seed, Signer},
+    cpi::{DynCpiCall, Seed},
     prelude::*,
     remaining::RemainingAccounts,
     sysvars::Sysvar as _,
 };
 
 use crate::{
+    error::WalletError,
     state::{
         intent::{Intent, IntentType},
         proposal::{Proposal, ProposalStatus},
@@ -24,13 +25,16 @@ pub struct Execute<'info> {
         bump,
     )]
     pub vault: &'info mut UncheckedAccount,
-    #[account(mut)]
+    #[account(
+        mut,
+        has_one = wallet,
+    )]
     pub intent: Account<Intent<'info>>,
     #[account(
         mut,
         has_one = wallet,
         has_one = intent,
-        constraint = proposal.status == ProposalStatus::Approved @ ProgramError::InvalidArgument
+        constraint = proposal.status == ProposalStatus::Approved @ WalletError::ProposalNotApproved
     )]
     pub proposal: Account<Proposal<'info>>,
     pub system_program: &'info Program<System>,
@@ -47,7 +51,7 @@ impl<'info> Execute<'info> {
         let timelock = self.intent.timelock_seconds.get() as i64;
         require!(
             clock.unix_timestamp.get() >= approved_at + timelock,
-            ProgramError::InvalidArgument
+            WalletError::TimelockNotElapsed
         );
 
         match self.intent.intent_type {
@@ -58,15 +62,17 @@ impl<'info> Execute<'info> {
         }
 
         self.proposal.status = ProposalStatus::Executed;
-        let count = self.intent.active_proposal_count.get();
-        self.intent.active_proposal_count = PodU16::from(count).saturating_sub(1);
+        self.intent.active_proposal_count = self.intent.active_proposal_count.saturating_sub(1);
 
         Ok(())
     }
 
     /// remaining: [0]=payer(mut,signer), [1]=new_intent(mut)
     fn execute_add_intent(&mut self, remaining: RemainingAccounts) -> Result<(), ProgramError> {
-        require!(self.wallet.intent_index < u8::MAX, ProgramError::InvalidArgument);
+        require!(
+            self.wallet.intent_index < u8::MAX,
+            WalletError::TooManyIntents
+        );
         let new_index = self.wallet.intent_index + 1;
         let wallet_addr = *self.wallet.address();
         let params_data = self.proposal.params_data();
@@ -147,9 +153,13 @@ impl<'info> Execute<'info> {
         let apc_bytes =
             unsafe { core::slice::from_raw_parts(target.data_mut_ptr().add(apc_offset), 2) };
         let active_count = u16::from_le_bytes([apc_bytes[0], apc_bytes[1]]);
-        require!(active_count == 0, ProgramError::InvalidArgument);
+        require!(active_count == 0, WalletError::IntentHasActiveProposals);
 
-        unsafe { *target.data_mut_ptr().add(crate::state::intent::INTENT_APPROVED_OFFSET) = 0 };
+        unsafe {
+            *target
+                .data_mut_ptr()
+                .add(crate::state::intent::INTENT_APPROVED_OFFSET) = 0
+        };
 
         Ok(())
     }
@@ -182,7 +192,7 @@ impl<'info> Execute<'info> {
         let apc_bytes =
             unsafe { core::slice::from_raw_parts(target.data_mut_ptr().add(apc_offset), 2) };
         let active_count = u16::from_le_bytes([apc_bytes[0], apc_bytes[1]]);
-        require!(active_count == 0, ProgramError::InvalidArgument);
+        require!(active_count == 0, WalletError::IntentHasActiveProposals);
 
         // Rewrite intent data
         let new_data = &params_data[1..];
@@ -236,17 +246,19 @@ impl<'info> Execute<'info> {
         let mut remaining_iter = remaining.iter();
 
         for acct_def in acct_entries {
-            require!(account_count < 32, ProgramError::InvalidArgument);
+            require!(account_count < 32, WalletError::TooManyAccounts);
             if acct_def.source_type == AccountSourceType::Vault {
                 account_views[account_count].write(self.vault.to_account_view().clone());
             } else if acct_def.source_type == AccountSourceType::Static {
                 let po = acct_def.pool_offset.get() as usize;
                 let pl = acct_def.pool_len.get() as usize;
-                let addr_bytes = pool.get(po..po + pl)
+                let addr_bytes = pool
+                    .get(po..po + pl)
                     .ok_or(ProgramError::InvalidInstructionData)?;
                 require!(addr_bytes.len() >= 32, ProgramError::InvalidInstructionData);
                 let addr = Address::new_from_array(
-                    addr_bytes[..32].try_into()
+                    addr_bytes[..32]
+                        .try_into()
                         .map_err(|_| ProgramError::InvalidInstructionData)?,
                 );
                 if let Some(dv) = declared.iter().find(|d| *d.address() == addr) {
@@ -275,30 +287,59 @@ impl<'info> Execute<'info> {
             self.vault.address(),
         )?;
 
-        execute_cpi_loop(bumps, intent, params_data, &account_views, account_count)
+        let vault_seeds = self.vault_seeds(bumps);
+        execute_cpi_loop(
+            &vault_seeds,
+            intent,
+            params_data,
+            &account_views,
+            account_count,
+        )
     }
 }
 
-/// CPI execution loop in its own stack frame (ix_data and CPI arrays are large).
+/// CPI execution loop in its own stack frame (DynCpiCall is large).
 #[inline(never)]
 fn execute_cpi_loop(
-    bumps: &ExecuteBumps,
+    vault_seeds: &[Seed],
     intent: &Intent<'_>,
     params_data: &[u8],
     account_views: &[core::mem::MaybeUninit<AccountView>; 32],
     account_count: usize,
 ) -> Result<(), ProgramError> {
-    let vault_seeds = bumps.vault_seeds();
     let ix_entries = intent.instructions();
     let seg_entries = intent.data_segments();
     let acct_entries = intent.accounts();
     let pool = intent.byte_pool();
 
     for ix_entry in ix_entries {
-        // Build instruction data from segments
-        let mut ix_data = [0u8; 1024];
-        let mut ix_len = 0usize;
+        let prog_idx = ix_entry.program_account_index as usize;
+        require!(prog_idx < account_count, ProgramError::NotEnoughAccountKeys);
+        let program = unsafe { account_views[prog_idx].assume_init_ref() };
 
+        let mut cpi = DynCpiCall::<16, 1024>::new(program.address());
+
+        // Push accounts
+        let acct_idx_offset = ix_entry.account_indexes_offset.get() as usize;
+        let acct_idx_len = ix_entry.account_indexes_len.get() as usize;
+        let acct_indexes = &pool[acct_idx_offset..acct_idx_offset + acct_idx_len];
+
+        require!(
+            acct_indexes.len() <= 16,
+            ProgramError::InvalidInstructionData
+        );
+
+        for &idx in acct_indexes {
+            let idx = idx as usize;
+            require!(idx < account_count, ProgramError::NotEnoughAccountKeys);
+            let view = unsafe { account_views[idx].assume_init_ref() };
+            let acct_def = &acct_entries[idx];
+            cpi.push_account(view, acct_def.is_signer, acct_def.is_writable)?;
+        }
+
+        // Build instruction data from segments directly into the CPI buffer
+        let mut ix_len = 0usize;
+        let data_ptr = cpi.data_mut() as *mut u8;
         let seg_start = ix_entry.segments_start.get() as usize;
         let seg_count = ix_entry.segments_count.get() as usize;
 
@@ -311,7 +352,13 @@ fn execute_cpi_loop(
                         ix_len + seg_pool.len() <= 1024,
                         ProgramError::InvalidInstructionData
                     );
-                    ix_data[ix_len..ix_len + seg_pool.len()].copy_from_slice(seg_pool);
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            seg_pool.as_ptr(),
+                            data_ptr.add(ix_len),
+                            seg_pool.len(),
+                        );
+                    }
                     ix_len += seg_pool.len();
                 }
                 SegmentType::Param => {
@@ -323,59 +370,20 @@ fn execute_cpi_loop(
                     let size = encoding.byte_size();
                     require!(val.len() >= size, ProgramError::InvalidInstructionData);
                     require!(ix_len + size <= 1024, ProgramError::InvalidInstructionData);
-                    ix_data[ix_len..ix_len + size].copy_from_slice(&val[..size]);
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            val.as_ptr(),
+                            data_ptr.add(ix_len),
+                            size,
+                        );
+                    }
                     ix_len += size;
                 }
             }
         }
 
-        // Build CPI account lists
-        let acct_idx_offset = ix_entry.account_indexes_offset.get() as usize;
-        let acct_idx_len = ix_entry.account_indexes_len.get() as usize;
-        let acct_indexes = &pool[acct_idx_offset..acct_idx_offset + acct_idx_len];
-
-        require!(
-            acct_indexes.len() <= 16,
-            ProgramError::InvalidInstructionData
-        );
-
-        let mut cpi_ix_accounts: [core::mem::MaybeUninit<InstructionAccount>; 32] =
-            unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-        let mut cpi_accts: [core::mem::MaybeUninit<CpiAccount>; 32] =
-            unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-
-        for (i, &idx) in acct_indexes.iter().enumerate() {
-            let idx = idx as usize;
-            require!(idx < account_count, ProgramError::NotEnoughAccountKeys);
-            let view = unsafe { account_views[idx].assume_init_ref() };
-            let acct_def = &acct_entries[idx];
-
-            cpi_ix_accounts[i].write(
-                InstructionAccount::new(view.address(), acct_def.is_writable, acct_def.is_signer),
-            );
-            cpi_accts[i].write(CpiAccount::from(view));
-        }
-
-        let prog_idx = ix_entry.program_account_index as usize;
-        require!(prog_idx < account_count, ProgramError::NotEnoughAccountKeys);
-        let program = unsafe { account_views[prog_idx].assume_init_ref() };
-
-        let instruction = InstructionView {
-            program_id: program.address(),
-            accounts: unsafe {
-                core::slice::from_raw_parts(cpi_ix_accounts[0].as_ptr(), acct_indexes.len())
-            },
-            data: &ix_data[..ix_len],
-        };
-
-        let signers = [Signer::from(&vault_seeds[..])];
-        unsafe {
-            solana_instruction_view::cpi::invoke_signed_unchecked(
-                &instruction,
-                core::slice::from_raw_parts(cpi_accts[0].as_ptr(), acct_indexes.len()),
-                &signers,
-            );
-        }
+        cpi.set_data_len(ix_len)?;
+        cpi.invoke_signed(vault_seeds)?;
     }
 
     Ok(())
@@ -393,11 +401,10 @@ fn validate_remaining_accounts(
 ) -> Result<(), ProgramError> {
     let acct_entries = intent.accounts();
     let pool = intent.byte_pool();
-    let seed_entries = intent.seeds();
 
     require!(
         account_count == acct_entries.len(),
-        ProgramError::InvalidArgument
+        WalletError::AccountCountMismatch
     );
 
     for (i, acct_def) in acct_entries.iter().enumerate() {
@@ -416,7 +423,7 @@ fn validate_remaining_accounts(
                         .try_into()
                         .map_err(|_| ProgramError::InvalidInstructionData)?,
                 );
-                require_keys_eq!(current_addr, expected, ProgramError::InvalidArgument);
+                require_keys_eq!(current_addr, expected, WalletError::AccountAddressMismatch);
             }
             AccountSourceType::Param => {
                 let pool_data = pool
@@ -430,15 +437,19 @@ fn validate_remaining_accounts(
                         .try_into()
                         .map_err(|_| ProgramError::InvalidInstructionData)?,
                 );
-                require_keys_eq!(current_addr, expected, ProgramError::InvalidArgument);
+                require_keys_eq!(current_addr, expected, WalletError::AccountAddressMismatch);
             }
             AccountSourceType::PdaDerived => {
                 let pool_data = pool
                     .get(po..po + pl)
                     .ok_or(ProgramError::InvalidInstructionData)?;
                 validate_pda_account(
-                    &current_addr, pool_data, account_views, account_count,
-                    intent, params_data, pool, seed_entries,
+                    &current_addr,
+                    pool_data,
+                    account_views,
+                    account_count,
+                    intent,
+                    params_data,
                 )?;
             }
             AccountSourceType::HasOne => {
@@ -447,38 +458,30 @@ fn validate_remaining_accounts(
                     .ok_or(ProgramError::InvalidInstructionData)?;
                 require!(pool_data.len() >= 3, ProgramError::InvalidInstructionData);
                 let acct_idx = pool_data[0] as usize;
-                let byte_offset =
-                    u16::from_le_bytes([pool_data[1], pool_data[2]]) as usize;
+                let byte_offset = u16::from_le_bytes([pool_data[1], pool_data[2]]) as usize;
 
-                require!(
-                    acct_idx < account_count,
-                    ProgramError::NotEnoughAccountKeys
-                );
-                let ref_view =
-                    unsafe { account_views[acct_idx].assume_init_ref() };
+                require!(acct_idx < account_count, ProgramError::NotEnoughAccountKeys);
+                let ref_view = unsafe { account_views[acct_idx].assume_init_ref() };
                 let data_len = ref_view.data_len();
                 require!(
                     byte_offset + 32 <= data_len,
                     ProgramError::InvalidInstructionData
                 );
                 let addr_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        ref_view.data_ptr().add(byte_offset),
-                        32,
-                    )
+                    core::slice::from_raw_parts(ref_view.data_ptr().add(byte_offset), 32)
                 };
                 let expected = Address::new_from_array(
                     addr_bytes
                         .try_into()
                         .map_err(|_| ProgramError::InvalidInstructionData)?,
                 );
-                require_keys_eq!(current_addr, expected, ProgramError::InvalidArgument);
+                require_keys_eq!(current_addr, expected, WalletError::AccountAddressMismatch);
             }
             AccountSourceType::Vault => {
                 require_keys_eq!(
                     current_addr,
                     *vault_address,
-                    ProgramError::InvalidArgument
+                    WalletError::AccountAddressMismatch
                 );
             }
         }
@@ -496,15 +499,18 @@ fn validate_pda_account(
     account_count: usize,
     intent: &Intent<'_>,
     params_data: &[u8],
-    pool: &[u8],
-    seed_entries: &[SeedEntry],
 ) -> Result<(), ProgramError> {
+    let pool = intent.byte_pool();
+    let seed_entries = intent.seeds();
     require!(pool_data.len() >= 5, ProgramError::InvalidInstructionData);
     let prog_acct_idx = pool_data[0] as usize;
     let seeds_start = u16::from_le_bytes([pool_data[1], pool_data[2]]) as usize;
     let seeds_count = u16::from_le_bytes([pool_data[3], pool_data[4]]) as usize;
 
-    require!(prog_acct_idx < account_count, ProgramError::NotEnoughAccountKeys);
+    require!(
+        prog_acct_idx < account_count,
+        ProgramError::NotEnoughAccountKeys
+    );
     let program_addr = *unsafe { account_views[prog_acct_idx].assume_init_ref() }.address();
 
     require!(seeds_count <= 16, ProgramError::InvalidInstructionData);
@@ -551,6 +557,6 @@ fn validate_pda_account(
     }
 
     let (expected, _) = Address::find_program_address(&seed_refs[..seeds_count], &program_addr);
-    require_keys_eq!(*current_addr, expected, ProgramError::InvalidArgument);
+    require_keys_eq!(*current_addr, expected, WalletError::AccountAddressMismatch);
     Ok(())
 }

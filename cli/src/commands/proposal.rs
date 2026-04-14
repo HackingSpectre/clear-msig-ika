@@ -173,16 +173,17 @@ pub fn handle(action: ProposalAction, config: &RuntimeConfig) -> Result<()> {
             );
 
             let payer_pubkey = solana_sdk::signer::Signer::pubkey(&config.payer);
-            let ix = crate::instructions::propose(
-                payer_pubkey,
-                wallet_pubkey,
-                intent_pubkey,
-                Pubkey::new_from_array(proposal_addr.to_bytes()),
-                expiry_ts,
+            let ix = crate::instructions::propose(crate::instructions::ProposeArgs {
+                payer: payer_pubkey,
+                wallet: wallet_pubkey,
+                intent: intent_pubkey,
+                proposal: Pubkey::new_from_array(proposal_addr.to_bytes()),
+                proposal_index,
+                expiry: expiry_ts,
                 proposer_pubkey,
                 signature,
-                &params_data,
-            );
+                params_data: &params_data,
+            });
 
             let sig = rpc::send_instruction(&client, config, ix)?;
 
@@ -470,13 +471,25 @@ fn execute_via_ika(
         hex_lower(&message_hash)
     );
 
-    // 3. Resolve the MessageApproval PDA + bump.
+    // 3. Resolve signing params and the dWallet's public key for PDA derivation.
+    let (curve, algo, scheme) = ika::signing_params(chain_kind, force_curve25519);
+    let curve_u16 = ika::curve_u16(curve);
+    let scheme_u16 = scheme as u16;
+
+    // Read the dWallet account to get the full public key for PDA derivation.
+    let dwallet_data = rpc::fetch_account(client, &dwallet_pk).with_context(|| {
+        format!("failed to fetch dwallet account {dwallet_pk}")
+    })?;
+    let dwallet_account = accounts::parse_dwallet(&dwallet_data)?;
+
+    // 4. Resolve the MessageApproval PDA + bump using hierarchical seeds.
     let (message_approval_pk, message_approval_bump) =
-        ika::message_approval_pda(&dwallet_program, &dwallet_pk, &message_hash);
+        ika::message_approval_pda(&dwallet_program, curve_u16, &dwallet_account.public_key, scheme_u16, &message_hash);
+    let (coordinator_pk, _) = ika::coordinator_pda(&dwallet_program);
     let (cpi_authority_pk, cpi_authority_bump) = ika::cpi_authority_pda(&program_id);
     let (dwallet_ownership_pk, _) = ika::dwallet_ownership_pda(&program_id, &dwallet_pk);
 
-    // 4. Send the on-chain ika_sign instruction.
+    // 5. Send the on-chain ika_sign instruction.
     let payer_pubkey = solana_sdk::signer::Signer::pubkey(&config.payer);
     let ix = crate::instructions::ika_sign(
         payer_pubkey,
@@ -487,6 +500,7 @@ fn execute_via_ika(
         dwallet_ownership_pk,
         dwallet_pk,
         message_approval_pk,
+        coordinator_pk,
         cpi_authority_pk,
         dwallet_program,
         message_approval_bump,
@@ -496,7 +510,7 @@ fn execute_via_ika(
         .with_context(|| "ika_sign failed")?;
     eprintln!("✓ ika_sign tx: {quorum_tx_sig}");
 
-    // 5. Wait for the MessageApproval PDA to materialize on-chain.
+    // 6. Wait for the MessageApproval PDA to materialize on-chain.
     ika::poll_until(
         client,
         &message_approval_pk,
@@ -506,15 +520,22 @@ fn execute_via_ika(
     .with_context(|| "MessageApproval PDA never appeared after ika_sign")?;
     eprintln!("✓ MessageApproval pending: {message_approval_pk}");
 
-    // 6. gRPC: presign then sign.
-    let (curve, algo, hash_scheme) = ika::signing_params(chain_kind, force_curve25519);
-    // dWallet address bytes are the 32-byte session_identifier_preimage. We
-    // pull them out of the user_pubkey hex stored in IkaConfig (the first
-    // 32 bytes of the dWallet's curve-native pubkey).
+    // 7. gRPC: presign then sign.
+    // dWallet address bytes are the 32-byte session_identifier_preimage.
     let pubkey_bytes = parse_hex_local(&cfg.user_pubkey)?;
     let mut dwallet_addr_bytes = [0u8; 32];
     let take = pubkey_bytes.len().min(32);
     dwallet_addr_bytes[..take].copy_from_slice(&pubkey_bytes[..take]);
+
+    // We need the dWallet attestation for the Sign request. For now we
+    // construct a dummy attestation — in a production flow we'd persist
+    // the attestation from DKG. The mock signer accepts this.
+    let dwallet_attestation = ika_dwallet_types::NetworkSignedAttestation {
+        attestation_data: vec![],
+        network_signature: vec![],
+        network_pubkey: vec![],
+        epoch: 1,
+    };
 
     let presign_id = ika::presign(config, grpc_url, dwallet_addr_bytes, curve, algo)?;
     eprintln!("✓ Presign allocated ({} bytes)", presign_id.len());
@@ -523,16 +544,15 @@ fn execute_via_ika(
         config,
         grpc_url,
         dwallet_addr_bytes,
-        curve,
-        algo,
-        hash_scheme,
+        dwallet_attestation,
         presign_id,
         preimage.clone(),
+        vec![], // message_metadata — empty for EVM/BTC
         quorum_tx_sig.as_ref().to_vec(),
     )?;
     eprintln!("✓ Signature received from Ika ({} bytes)", signature.len());
 
-    // 7. Poll MessageApproval until the network commits the signature.
+    // 8. Poll MessageApproval until the network commits the signature.
     let ma_signed = ika::poll_until(
         client,
         &message_approval_pk,
@@ -558,25 +578,9 @@ fn execute_via_ika(
         "message_approval": message_approval_pk.to_string(),
     });
 
-    // 8. Optional: assemble the chain-native signed transaction and broadcast
-    //    it. The chain dispatch lives in `crate::chains::broadcast_signed_tx`,
-    //    which switches on `chain_kind` to pick EVM / BTC / future chains.
-    //    We need the dWallet's full SEC1 compressed pubkey (33 bytes for
-    //    secp256k1) to recover `v` for ECDSA chains and to push the witness
-    //    item for BTC; the IkaConfig only stores a 32-byte truncated form,
-    //    so read the on-chain DWallet account directly here.
-    //
-    //    BTC also needs the original output values (`recipient_pkh`,
-    //    `send_amount`) and tx-template fields (`sequence`, `lock_time`)
-    //    that the BIP143 preimage commits to as a hash but doesn't carry
-    //    verbatim. We re-read them from the proposal's params + the intent's
-    //    `tx_template` block to populate `BroadcastInputs::BitcoinP2wpkh`.
+    // 9. Optional: assemble the chain-native signed transaction and broadcast.
     if broadcast {
         let rpc_url = rpc_url.expect("--broadcast already validated to require --rpc-url");
-        let dwallet_data = rpc::fetch_account(client, &dwallet_pk).with_context(|| {
-            format!("failed to fetch dwallet account {dwallet_pk} for broadcast")
-        })?;
-        let dwallet_account = accounts::parse_dwallet(&dwallet_data)?;
 
         let inputs = build_broadcast_inputs(
             chain_kind,

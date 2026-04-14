@@ -4,7 +4,7 @@ use crate::quasar_client::create_wallet::CreateWalletInstruction;
 use crate::quasar_client::execute::ExecuteInstruction;
 use crate::quasar_client::ika_sign::IkaSignInstruction;
 use crate::quasar_client::propose::ProposeInstruction;
-use quasar_lang::client::{DynBytes, TailBytes};
+use quasar_lang::client::{DynBytes, DynVec, TailBytes};
 use solana_sdk::{
     instruction::{AccountMeta, Instruction},
     pubkey::Pubkey,
@@ -42,69 +42,67 @@ fn sdk_ix_from_ext(ix: solana_instruction_v3::Instruction) -> Instruction {
     }
 }
 
-/// Build create_wallet instruction (Quasar discriminator 0).
-///
-/// Delegates to the vendored `quasar_client::create_wallet` builder which uses
-/// `wincode::serialize_into` for each field — the program rejects raw byte
-/// appends since clear-wallet is a Quasar program with custom encoding.
-pub fn create_wallet(
-    payer: Pubkey, name_hash: Pubkey, wallet: Pubkey,
-    add_intent: Pubkey, remove_intent: Pubkey, update_intent: Pubkey,
-    name: &str, threshold: u8, cancel_threshold: u8, timelock: u32,
-    proposers: &[Pubkey], approvers: &[Pubkey],
-) -> Instruction {
-    let mut remaining_accounts: Vec<solana_instruction_v3::AccountMeta> =
-        Vec::with_capacity(proposers.len() + approvers.len());
-    for p in proposers {
-        remaining_accounts.push(solana_instruction_v3::AccountMeta {
-            pubkey: pk_to_addr(*p),
-            is_signer: false,
-            is_writable: false,
-        });
-    }
-    for a in approvers {
-        remaining_accounts.push(solana_instruction_v3::AccountMeta {
-            pubkey: pk_to_addr(*a),
-            is_signer: false,
-            is_writable: false,
-        });
-    }
+pub struct CreateWalletArgs<'a> {
+    pub payer: Pubkey,
+    pub name_hash: Pubkey,
+    pub wallet: Pubkey,
+    pub add_intent: Pubkey,
+    pub remove_intent: Pubkey,
+    pub update_intent: Pubkey,
+    pub name: &'a str,
+    pub threshold: u8,
+    pub cancel_threshold: u8,
+    pub timelock: u32,
+    pub proposers: &'a [Pubkey],
+    pub approvers: &'a [Pubkey],
+}
 
+/// Build create_wallet instruction (Quasar discriminator 0).
+pub fn create_wallet(args: CreateWalletArgs<'_>) -> Instruction {
     let ext_ix: solana_instruction_v3::Instruction = CreateWalletInstruction {
-        payer: pk_to_addr(payer),
-        name_hash: pk_to_addr(name_hash),
-        wallet: pk_to_addr(wallet),
-        add_intent: pk_to_addr(add_intent),
-        remove_intent: pk_to_addr(remove_intent),
-        update_intent: pk_to_addr(update_intent),
+        payer: pk_to_addr(args.payer),
+        name_hash: pk_to_addr(args.name_hash),
+        wallet: pk_to_addr(args.wallet),
+        add_intent: pk_to_addr(args.add_intent),
+        remove_intent: pk_to_addr(args.remove_intent),
+        update_intent: pk_to_addr(args.update_intent),
         system_program: pk_to_addr(solana_sdk::system_program::id()),
-        approval_threshold: threshold,
-        cancellation_threshold: cancel_threshold,
-        timelock_seconds: timelock,
-        num_proposers: proposers.len() as u8,
-        name: DynBytes::from(name.as_bytes().to_vec()),
-        remaining_accounts,
+        approval_threshold: args.threshold,
+        cancellation_threshold: args.cancel_threshold,
+        timelock_seconds: args.timelock,
+        name: DynBytes::from(args.name.as_bytes().to_vec()),
+        proposers: DynVec::new(args.proposers.iter().map(|p| p.to_bytes()).collect()),
+        approvers: DynVec::new(args.approvers.iter().map(|a| a.to_bytes()).collect()),
     }
     .into();
     sdk_ix_from_ext(ext_ix)
 }
 
+pub struct ProposeArgs<'a> {
+    pub payer: Pubkey,
+    pub wallet: Pubkey,
+    pub intent: Pubkey,
+    pub proposal: Pubkey,
+    pub proposal_index: u64,
+    pub expiry: i64,
+    pub proposer_pubkey: [u8; 32],
+    pub signature: [u8; 64],
+    pub params_data: &'a [u8],
+}
+
 /// Build propose instruction (Quasar discriminator 1) via the vendored client.
-pub fn propose(
-    payer: Pubkey, wallet: Pubkey, intent: Pubkey, proposal: Pubkey,
-    expiry: i64, proposer_pubkey: [u8; 32], signature: [u8; 64],
-    params_data: &[u8],
-) -> Instruction {
+pub fn propose(args: ProposeArgs<'_>) -> Instruction {
     let ext_ix: solana_instruction_v3::Instruction = ProposeInstruction {
-        payer: pk_to_addr(payer),
-        wallet: pk_to_addr(wallet),
-        intent: pk_to_addr(intent),
-        proposal: pk_to_addr(proposal),
+        payer: pk_to_addr(args.payer),
+        wallet: pk_to_addr(args.wallet),
+        intent: pk_to_addr(args.intent),
+        proposal: pk_to_addr(args.proposal),
         system_program: pk_to_addr(solana_sdk::system_program::id()),
-        expiry,
-        proposer_pubkey,
-        signature,
-        params_data: TailBytes(params_data.to_vec()),
+        proposal_index: args.proposal_index,
+        expiry: args.expiry,
+        proposer_pubkey: args.proposer_pubkey,
+        signature: args.signature,
+        params_data: TailBytes(args.params_data.to_vec()),
     }
     .into();
     sdk_ix_from_ext(ext_ix)
@@ -203,7 +201,7 @@ pub fn bind_dwallet(
     dwallet_program: Pubkey,
     chain_kind: u8,
     user_pubkey: [u8; 32],
-    signature_scheme: u8,
+    signature_scheme: u16,
     cpi_authority_bump: u8,
 ) -> Instruction {
     let ext_ix: solana_instruction_v3::Instruction = BindDwalletInstruction {
@@ -236,6 +234,7 @@ pub fn ika_sign(
     dwallet_ownership: Pubkey,
     dwallet: Pubkey,
     message_approval: Pubkey,
+    coordinator: Pubkey,
     cpi_authority: Pubkey,
     dwallet_program: Pubkey,
     message_approval_bump: u8,
@@ -250,6 +249,7 @@ pub fn ika_sign(
         dwallet_ownership: pk_to_addr(dwallet_ownership),
         dwallet: pk_to_addr(dwallet),
         message_approval: pk_to_addr(message_approval),
+        coordinator: pk_to_addr(coordinator),
         cpi_authority: pk_to_addr(cpi_authority),
         caller_program: pk_to_addr(program_id()),
         dwallet_program: pk_to_addr(dwallet_program),

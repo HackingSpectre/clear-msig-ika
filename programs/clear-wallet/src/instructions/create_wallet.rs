@@ -1,10 +1,12 @@
-use {
-    crate::state::{
-        intent::{Intent, IntentType},
-        wallet::ClearWallet,
+use quasar_lang::prelude::*;
+
+use crate::{
+    error::WalletError,
+    state::{
+        intent::{Intent, IntentInner, IntentType},
+        wallet::{ClearWallet, ClearWalletInner},
     },
-    crate::utils::hash::sha256,
-    quasar_lang::prelude::*,
+    utils::hash::sha256,
 };
 
 /// Creates a ClearWallet with three default meta-intents.
@@ -23,33 +25,29 @@ pub struct CreateWallet<'info> {
     pub name_hash: &'info UncheckedAccount,
     #[account(
         init,
-        mut,
         payer = payer,
-        seeds = [b"clear_wallet", name_hash],
+        seeds = ClearWallet::seeds(name_hash),
         bump,
     )]
     pub wallet: Account<ClearWallet<'info>>,
     #[account(
         init,
-        mut,
         payer = payer,
-        seeds = [b"intent", wallet, b"\x00"],
+        seeds = Intent::seeds(wallet, b"\x00"),
         bump,
     )]
     pub add_intent: Account<Intent<'info>>,
     #[account(
         init,
-        mut,
         payer = payer,
-        seeds = [b"intent", wallet, b"\x01"],
+        seeds = Intent::seeds(wallet, b"\x01"),
         bump,
     )]
     pub remove_intent: Account<Intent<'info>>,
     #[account(
         init,
-        mut,
         payer = payer,
-        seeds = [b"intent", wallet, b"\x02"],
+        seeds = Intent::seeds(wallet, b"\x02"),
         bump,
     )]
     pub update_intent: Account<Intent<'info>>,
@@ -83,27 +81,44 @@ impl<'info> CreateWallet<'info> {
 
         let proposer_count = args.proposers.len() as u8;
         let approver_count = args.approvers.len() as u8;
-        require!(proposer_count as usize <= 16, ProgramError::InvalidArgument);
-        require!(approver_count as usize <= 16, ProgramError::InvalidArgument);
+        require!(proposer_count as usize <= 16, WalletError::TooManyProposers);
+        require!(approver_count as usize <= 16, WalletError::TooManyApprovers);
 
-        require!(args.approval_threshold > 0, ProgramError::InvalidArgument);
-        require!(args.approval_threshold <= approver_count, ProgramError::InvalidArgument);
-        require!(args.cancellation_threshold > 0, ProgramError::InvalidArgument);
-        require!(args.cancellation_threshold <= approver_count, ProgramError::InvalidArgument);
+        require!(args.approval_threshold > 0, WalletError::InvalidApprovalThreshold);
+        require!(
+            args.approval_threshold <= approver_count,
+            WalletError::InvalidApprovalThreshold
+        );
+        require!(
+            args.cancellation_threshold > 0,
+            WalletError::InvalidCancellationThreshold
+        );
+        require!(
+            args.cancellation_threshold <= approver_count,
+            WalletError::InvalidCancellationThreshold
+        );
 
         // Address is #[repr(transparent)] over [u8; 32], safe to cast
         let proposers: &[Address] = unsafe {
-            core::slice::from_raw_parts(args.proposers.as_ptr() as *const Address, args.proposers.len())
+            core::slice::from_raw_parts(
+                args.proposers.as_ptr() as *const Address,
+                args.proposers.len(),
+            )
         };
         let approvers: &[Address] = unsafe {
-            core::slice::from_raw_parts(args.approvers.as_ptr() as *const Address, args.approvers.len())
+            core::slice::from_raw_parts(
+                args.approvers.as_ptr() as *const Address,
+                args.approvers.len(),
+            )
         };
 
         self.wallet.set_inner(
-            bumps.wallet,
-            0u64,
-            2u8, // intent_index = 2 (three intents: 0, 1, 2)
-            args.name,
+            ClearWalletInner {
+                bump: bumps.wallet,
+                proposal_index: 0u64,
+                intent_index: 2u8, // three intents: 0, 1, 2
+                name: args.name,
+            },
             self.payer.to_account_view(),
             None,
         )?;
@@ -116,24 +131,52 @@ impl<'info> CreateWallet<'info> {
         let empty_pool: &[u8] = &[];
 
         let meta_intents = [
-            (&mut self.add_intent, 0u8, IntentType::AddIntent, bumps.add_intent),
-            (&mut self.remove_intent, 1u8, IntentType::RemoveIntent, bumps.remove_intent),
-            (&mut self.update_intent, 2u8, IntentType::UpdateIntent, bumps.update_intent),
+            (
+                &mut self.add_intent,
+                0u8,
+                IntentType::AddIntent,
+                bumps.add_intent,
+            ),
+            (
+                &mut self.remove_intent,
+                1u8,
+                IntentType::RemoveIntent,
+                bumps.remove_intent,
+            ),
+            (
+                &mut self.update_intent,
+                2u8,
+                IntentType::UpdateIntent,
+                bumps.update_intent,
+            ),
         ];
 
         for (intent, index, intent_type, bump) in meta_intents {
             intent.set_inner(
-                wallet_addr, bump, index, intent_type,
-                0u8, // chain_kind = Solana (meta intents are local)
-                1u8, // approved
-                args.approval_threshold, args.cancellation_threshold,
-                args.timelock_seconds,
-                0u16, 0u16, // template offset/len
-                0u16, 0u16, // tx_template offset/len
-                0u16, // active_proposal_count
-                proposers, approvers,
-                empty_params, empty_accounts, empty_instructions,
-                empty_segments, empty_seeds, empty_pool,
+                IntentInner {
+                    wallet: wallet_addr,
+                    bump,
+                    intent_index: index,
+                    intent_type,
+                    chain_kind: 0u8, // Solana (meta intents are local)
+                    approved: 1u8,
+                    approval_threshold: args.approval_threshold,
+                    cancellation_threshold: args.cancellation_threshold,
+                    timelock_seconds: args.timelock_seconds,
+                    template_offset: 0u16,
+                    template_len: 0u16,
+                    tx_template_offset: 0u16,
+                    tx_template_len: 0u16,
+                    active_proposal_count: 0u16,
+                    proposers,
+                    approvers,
+                    params: empty_params,
+                    accounts: empty_accounts,
+                    instructions: empty_instructions,
+                    data_segments: empty_segments,
+                    seeds: empty_seeds,
+                    byte_pool: empty_pool,
+                },
                 self.payer.to_account_view(),
                 None,
             )?;

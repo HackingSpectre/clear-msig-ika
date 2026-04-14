@@ -48,32 +48,38 @@ impl<'a> DWalletContext<'a> {
     ///
     /// # Accounts
     ///
-    /// 0. `[writable]`        message_approval — PDA to create
-    /// 1. `[readonly]`        dwallet — program-owned dWallet account
-    /// 2. `[readonly]`        caller_program — clear-wallet program (executable)
-    /// 3. `[readonly, signer]` cpi_authority — clear-wallet's CPI authority PDA
-    /// 4. `[writable, signer]` payer — pays for the new PDA's rent
-    /// 5. `[readonly]`        system_program
+    /// 0. `[readonly]`         coordinator — DWalletCoordinator PDA (for epoch)
+    /// 1. `[writable]`         message_approval — PDA to create
+    /// 2. `[readonly]`         dwallet — program-owned dWallet account
+    /// 3. `[readonly]`         caller_program — clear-wallet program (executable)
+    /// 4. `[readonly, signer]` cpi_authority — clear-wallet's CPI authority PDA
+    /// 5. `[writable, signer]` payer — pays for the new PDA's rent
+    /// 6. `[readonly]`         system_program
     pub fn approve_message(
         &self,
+        coordinator: &'a AccountView,
         message_approval: &'a AccountView,
         dwallet: &'a AccountView,
         payer: &'a AccountView,
         system_program: &'a AccountView,
-        message_hash: [u8; 32],
+        message_digest: [u8; 32],
+        message_metadata_digest: [u8; 32],
         user_pubkey: [u8; 32],
-        signature_scheme: u8,
+        signature_scheme: u16,
         message_approval_bump: u8,
     ) -> Result<(), ProgramError> {
-        // [discriminator(1), bump(1), message_hash(32), user_pubkey(32), scheme(1)] = 67 bytes
-        let mut ix_data = [0u8; 67];
+        // [discriminator(1), bump(1), message_digest(32),
+        //  message_metadata_digest(32), user_pubkey(32), scheme(2)] = 100 bytes
+        let mut ix_data = [0u8; 100];
         ix_data[0] = IX_APPROVE_MESSAGE;
         ix_data[1] = message_approval_bump;
-        ix_data[2..34].copy_from_slice(&message_hash);
-        ix_data[34..66].copy_from_slice(&user_pubkey);
-        ix_data[66] = signature_scheme;
+        ix_data[2..34].copy_from_slice(&message_digest);
+        ix_data[34..66].copy_from_slice(&message_metadata_digest);
+        ix_data[66..98].copy_from_slice(&user_pubkey);
+        ix_data[98..100].copy_from_slice(&signature_scheme.to_le_bytes());
 
         let ix_accounts = [
+            InstructionAccount::new(coordinator.address(), false, false),
             InstructionAccount::new(message_approval.address(), true, false),
             InstructionAccount::new(dwallet.address(), false, false),
             InstructionAccount::new(self.caller_program.address(), false, false),
@@ -83,6 +89,7 @@ impl<'a> DWalletContext<'a> {
         ];
 
         let cpi_accts = [
+            CpiAccount::from(coordinator),
             CpiAccount::from(message_approval),
             CpiAccount::from(dwallet),
             CpiAccount::from(self.caller_program),
@@ -115,13 +122,6 @@ impl<'a> DWalletContext<'a> {
     }
 
     /// CPI into Ika `transfer_ownership` to set a dWallet's authority to a new pubkey.
-    ///
-    /// Used by `bind_dwallet` to transfer authority from the wallet creator
-    /// (or current holder) to the clear-wallet program's CPI authority PDA.
-    /// Requires that this program's CPI authority is the *current* authority,
-    /// so the very first transfer must be performed off-chain by the dWallet
-    /// owner — this helper handles subsequent transfers (e.g., handing the
-    /// dWallet to a different program).
     ///
     /// # Accounts
     ///
@@ -172,4 +172,3 @@ impl<'a> DWalletContext<'a> {
         Ok(())
     }
 }
-

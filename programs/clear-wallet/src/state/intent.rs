@@ -1,6 +1,6 @@
 use quasar_lang::prelude::*;
 
-use crate::utils::definition::*;
+use crate::{error::WalletError, utils::definition::*};
 
 /// Raw byte offsets in the Intent account data for fields that need
 /// direct access from remaining_accounts (where quasar casting isn't available).
@@ -37,7 +37,8 @@ impl IntentType {
 
 /// The intent account IS the definition. No separate blob — all fields
 /// are directly on the account struct, handled zero-copy by quasar.
-#[account(discriminator = 2)]
+#[account(discriminator = 2, set_inner)]
+#[seeds(b"intent", wallet: Address, intent_index: u8)]
 pub struct Intent<'a> {
     // --- Intent identity ---
     pub wallet: Address,
@@ -184,12 +185,12 @@ impl Intent<'_> {
                     if param.constraint_type == ConstraintType::LessThanU64 {
                         require!(
                             val < param.constraint_value.get(),
-                            ProgramError::InvalidArgument
+                            WalletError::ParamConstraintViolation
                         );
                     } else if param.constraint_type == ConstraintType::GreaterThanU64 {
                         require!(
                             val > param.constraint_value.get(),
-                            ProgramError::InvalidArgument
+                            WalletError::ParamConstraintViolation
                         );
                     }
                     offset += 8;
@@ -218,7 +219,7 @@ impl Intent<'_> {
                 }
                 ParamType::Bool | ParamType::U8 => {
                     require!(
-                        offset + 1 <= params_data.len(),
+                        offset < params_data.len(),
                         ProgramError::InvalidInstructionData
                     );
                     offset += 1;

@@ -2,6 +2,8 @@
 
 use quasar_lang::prelude::*;
 
+mod error;
+pub use error::*;
 mod instructions;
 use instructions::*;
 mod state;
@@ -44,14 +46,22 @@ pub mod clear_wallet {
     #[instruction(discriminator = 1)]
     pub fn propose(
         ctx: Ctx<Propose>,
+        proposal_index: u64,
         expiry: i64,
         proposer_pubkey: [u8; 32],
         signature: [u8; 64],
         params_data: &[u8],
     ) -> Result<(), ProgramError> {
-        ctx.accounts.propose(ProposeArgs {
-            expiry, proposer_pubkey: &proposer_pubkey, signature: &signature, params_data,
-        })
+        ctx.accounts.propose(
+            proposal_index,
+            ProposeArgs {
+                expiry,
+                proposer_pubkey: &proposer_pubkey,
+                signature: &signature,
+                params_data,
+            },
+            &ctx.bumps,
+        )
     }
 
     #[instruction(discriminator = 2)]
@@ -83,10 +93,9 @@ pub mod clear_wallet {
     }
 
     #[instruction(discriminator = 4)]
-    pub fn execute(
-        ctx: CtxWithRemaining<Execute>,
-    ) -> Result<(), ProgramError> {
-        ctx.accounts.execute(&ctx.bumps, ctx.remaining_accounts_passthrough())
+    pub fn execute(ctx: CtxWithRemaining<Execute>) -> Result<(), ProgramError> {
+        ctx.accounts
+            .execute(&ctx.bumps, ctx.remaining_accounts_passthrough())
     }
 
     #[instruction(discriminator = 5)]
@@ -99,7 +108,7 @@ pub mod clear_wallet {
         ctx: Ctx<BindDwallet>,
         chain_kind: u8,
         user_pubkey: [u8; 32],
-        signature_scheme: u8,
+        signature_scheme: u16,
         cpi_authority_bump: u8,
     ) -> Result<(), ProgramError> {
         ctx.accounts.bind(BindDwalletArgs {

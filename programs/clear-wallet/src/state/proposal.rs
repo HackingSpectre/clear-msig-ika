@@ -11,7 +11,8 @@ pub enum ProposalStatus {
 
 /// Votes are tracked as a bitmap over the intent's approver list.
 /// Each bit position corresponds to an approver index in the intent.
-#[account(discriminator = 3)]
+#[account(discriminator = 3, set_inner)]
+#[seeds(b"proposal", intent: Address, proposal_index: u64)]
 pub struct Proposal<'a> {
     pub wallet: Address,
     pub intent: Address,
@@ -45,14 +46,14 @@ impl Proposal<'_> {
     }
 
     pub fn set_approval(&mut self, idx: u8) {
-        let mask = 1u16 << idx;
-        self.cancellation_bitmap = PodU16::from(self.cancellation_bitmap.get() & !mask);
-        self.approval_bitmap = PodU16::from(self.approval_bitmap.get() | mask);
+        let mask: PodU16 = (1u16 << idx).into();
+        self.cancellation_bitmap &= !mask;
+        self.approval_bitmap |= mask;
     }
 
     pub fn set_cancellation(&mut self, idx: u8) {
-        let mask = 1u16 << idx;
-        self.approval_bitmap = PodU16::from(self.approval_bitmap.get() & !mask);
-        self.cancellation_bitmap = PodU16::from(self.cancellation_bitmap.get() | mask);
+        let mask: PodU16 = (1u16 << idx).into();
+        self.approval_bitmap &= !mask;
+        self.cancellation_bitmap |= mask;
     }
 }

@@ -33,19 +33,20 @@ pub const DISC_MESSAGE_APPROVAL: u8 = 14;
 pub const COORDINATOR_LEN: usize = 116;
 pub const NEK_LEN: usize = 164;
 
-pub const MA_STATUS: usize = 139;
+// MessageApproval layout offsets (updated for new pre-alpha).
+pub const MA_STATUS: usize = 172;
 pub const MA_STATUS_SIGNED: u8 = 1;
-pub const MA_SIGNATURE_LEN: usize = 140;
-pub const MA_SIGNATURE: usize = 142;
+pub const MA_SIGNATURE_LEN: usize = 173;
+pub const MA_SIGNATURE: usize = 175;
 
 // Curve discriminants — match `DWalletCurve` repr in `ika-dwallet-types`.
-pub const CURVE_SECP256K1: u8 = 0;
-pub const CURVE_SECP256R1: u8 = 1;
-pub const CURVE_CURVE25519: u8 = 2;
+pub const CURVE_SECP256K1: u16 = 0;
+pub const CURVE_SECP256R1: u16 = 1;
+pub const CURVE_CURVE25519: u16 = 2;
 
-/// Map a `DWalletCurve` to its on-chain byte discriminant (used in dWallet
-/// PDA derivation `["dwallet", &[curve], pubkey]`).
-pub fn curve_byte(curve: DWalletCurve) -> u8 {
+/// Map a `DWalletCurve` to its on-chain u16 discriminant (used in dWallet
+/// PDA derivation `["dwallet", chunks(curve_u16_le || pubkey)]`).
+pub fn curve_u16(curve: DWalletCurve) -> u16 {
     match curve {
         DWalletCurve::Secp256k1 => CURVE_SECP256K1,
         DWalletCurve::Secp256r1 => CURVE_SECP256R1,
@@ -54,41 +55,31 @@ pub fn curve_byte(curve: DWalletCurve) -> u8 {
     }
 }
 
+/// Backwards-compat alias used by the `curve_byte` call sites that haven't
+/// been migrated to `curve_u16` yet (e.g. the old u8 code paths).
+pub fn curve_byte(curve: DWalletCurve) -> u8 {
+    curve_u16(curve) as u8
+}
+
 // ── PDA helpers ──
 
 /// Program-wide CPI authority PDA — `[SEED_CPI_AUTHORITY]`.
-///
-/// The Ika dWallet program enforces a single CPI authority per caller
-/// program ID via `verify_signer_or_cpi`, so this derivation has no other
-/// seeds. Per-wallet ownership of a dWallet is enforced one layer up via
-/// the `DwalletOwnership` PDA — see [`dwallet_ownership_pda`].
 pub fn cpi_authority_pda(program_id: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[SEED_CPI_AUTHORITY], program_id)
 }
 
 /// Per-dWallet ownership lock PDA — `["dwallet_owner", dwallet]`.
-///
-/// Created on the first `bind_dwallet` for a given dWallet, immutable
-/// thereafter. Both `bind_dwallet` (for additional chain_kinds) and every
-/// `ika_sign` re-read this account and reject if its recorded `wallet`
-/// doesn't match the calling clear-msig wallet. That's the layer that
-/// gives a multisig true ownership of a dWallet.
 pub fn dwallet_ownership_pda(program_id: &Pubkey, dwallet: &Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[b"dwallet_owner", dwallet.as_ref()], program_id)
 }
 
 /// Derive a dWallet PDA from `(curve, public_key)`.
 ///
-/// Mirrors the upstream `DWalletPdaSeeds::new`: concatenates `curve_byte ||
+/// Mirrors the upstream `DWalletPdaSeeds::new`: concatenates `curve_u16_le ||
 /// public_key` into a single buffer and splits it into 32-byte chunks
 /// (Solana's `MAX_SEED_LEN`), passing each chunk as its own PDA seed.
-/// Lossless and curve-agnostic — works for both 32-byte (Ed25519/Curve25519/
-/// Ristretto) and 33-byte (compressed Secp256k1/r1) public keys.
-pub fn dwallet_pda(dwallet_program: &Pubkey, curve: u8, public_key: &[u8]) -> (Pubkey, u8) {
-    let mut payload = Vec::with_capacity(1 + public_key.len());
-    payload.push(curve);
-    payload.extend_from_slice(public_key);
-
+pub fn dwallet_pda(dwallet_program: &Pubkey, curve: u16, public_key: &[u8]) -> (Pubkey, u8) {
+    let payload = pack_dwallet_seed_payload(curve, public_key);
     let mut seeds: Vec<&[u8]> = Vec::with_capacity(4);
     seeds.push(SEED_DWALLET);
     for chunk in payload.chunks(32) {
@@ -97,15 +88,39 @@ pub fn dwallet_pda(dwallet_program: &Pubkey, curve: u8, public_key: &[u8]) -> (P
     Pubkey::find_program_address(&seeds, dwallet_program)
 }
 
+/// Pack `curve_u16_le || public_key` for PDA seed chunking.
+fn pack_dwallet_seed_payload(curve: u16, public_key: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(2 + public_key.len());
+    buf.extend_from_slice(&curve.to_le_bytes());
+    buf.extend_from_slice(public_key);
+    buf
+}
+
+/// MessageApproval PDA — hierarchical seeds under the dWallet:
+/// `["dwallet", chunks(curve_u16_le || pk), "message_approval", &scheme_u16_le, &message_digest]`
 pub fn message_approval_pda(
     dwallet_program: &Pubkey,
-    dwallet: &Pubkey,
-    message_hash: &[u8; 32],
+    curve: u16,
+    public_key: &[u8],
+    signature_scheme: u16,
+    message_digest: &[u8; 32],
 ) -> (Pubkey, u8) {
-    Pubkey::find_program_address(
-        &[SEED_MESSAGE_APPROVAL, dwallet.as_ref(), message_hash],
-        dwallet_program,
-    )
+    let payload = pack_dwallet_seed_payload(curve, public_key);
+    let scheme_bytes = signature_scheme.to_le_bytes();
+    let mut seeds: Vec<&[u8]> = Vec::with_capacity(6);
+    seeds.push(b"dwallet");
+    for chunk in payload.chunks(32) {
+        seeds.push(chunk);
+    }
+    seeds.push(SEED_MESSAGE_APPROVAL);
+    seeds.push(&scheme_bytes);
+    seeds.push(message_digest);
+    Pubkey::find_program_address(&seeds, dwallet_program)
+}
+
+/// DWalletCoordinator PDA.
+pub fn coordinator_pda(dwallet_program: &Pubkey) -> (Pubkey, u8) {
+    Pubkey::find_program_address(&[SEED_DWALLET_COORDINATOR], dwallet_program)
 }
 
 /// `["ika_config", wallet, &[chain_kind]]` under clear-wallet's program.
@@ -122,26 +137,34 @@ pub fn ika_config_pda(
 
 // ── Setup probes ──
 
-/// Wait for the dWallet program's coordinator PDA to be initialized
-/// (the mock signer creates it on first run).
+/// Wait for the dWallet program's coordinator PDA to be initialized.
 pub fn wait_for_coordinator(
     client: &solana_client::rpc_client::RpcClient,
     dwallet_program: &Pubkey,
     timeout: Duration,
 ) -> Result<()> {
-    let (coord, _) = Pubkey::find_program_address(&[SEED_DWALLET_COORDINATOR], dwallet_program);
+    let (coord, _) = coordinator_pda(dwallet_program);
     poll_until(client, &coord, |d| d.len() >= COORDINATOR_LEN && d[0] == DISC_COORDINATOR, timeout)?;
     Ok(())
 }
 
 // ── gRPC dance ──
 
-/// Run a DKG via Ika gRPC. Returns `(dwallet_address, dwallet_public_key)`.
+/// DKG result — carries both the dWallet address and the attestation needed
+/// for later Sign requests.
+pub struct DkgResult {
+    pub dwallet_addr: [u8; 32],
+    pub public_key: Vec<u8>,
+    pub attestation: NetworkSignedAttestation,
+}
+
+/// Run a DKG via Ika gRPC. Returns the full DKG result including the
+/// attestation needed by subsequent Sign calls.
 pub fn dkg(
     config: &RuntimeConfig,
     grpc_url: &str,
     curve: DWalletCurve,
-) -> Result<([u8; 32], Vec<u8>)> {
+) -> Result<DkgResult> {
     let payer_pubkey = config.payer.pubkey();
     let request = SignedRequestData {
         session_identifier_preimage: [0u8; 32],
@@ -152,22 +175,28 @@ pub fn dkg(
             dwallet_network_encryption_public_key: vec![0u8; 32],
             curve,
             centralized_public_key_share_and_proof: vec![0u8; 32],
-            encrypted_centralized_secret_share_and_proof: vec![0u8; 32],
-            encryption_key: vec![0u8; 32],
+            user_secret_key_share: UserSecretKeyShare::Encrypted {
+                encrypted_centralized_secret_share_and_proof: vec![0u8; 32],
+                encryption_key: vec![0u8; 32],
+                signer_public_key: payer_pubkey.to_bytes().to_vec(),
+            },
             user_public_output: vec![0u8; 32],
-            signer_public_key: payer_pubkey.to_bytes().to_vec(),
+            sign_during_dkg_request: None,
         },
     };
 
     let response = grpc_call(grpc_url, build_signed_request(&payer_pubkey, request))?;
     match response {
-        TransactionResponseData::Attestation { attestation_data, .. } => {
-            let dwallet_addr: [u8; 32] = attestation_data[0..32]
-                .try_into()
-                .map_err(|_| anyhow!("DKG response too short"))?;
-            let pk_len = attestation_data[32] as usize;
-            let public_key = attestation_data[33..33 + pk_len].to_vec();
-            Ok((dwallet_addr, public_key))
+        TransactionResponseData::Attestation(attestation) => {
+            let versioned: VersionedDWalletDataAttestation =
+                bcs::from_bytes(&attestation.attestation_data)
+                    .with_context(|| "failed to decode DKG attestation")?;
+            let VersionedDWalletDataAttestation::V1(data) = versioned;
+            Ok(DkgResult {
+                dwallet_addr: data.session_identifier,
+                public_key: data.public_key,
+                attestation,
+            })
         }
         TransactionResponseData::Error { message } => Err(anyhow!("gRPC DKG failed: {message}")),
         other => Err(anyhow!("unexpected DKG response: {other:?}")),
@@ -175,6 +204,7 @@ pub fn dkg(
 }
 
 /// Allocate a presign for the given dWallet via Ika gRPC.
+/// Returns `(presign_session_identifier, presign_data)`.
 pub fn presign(
     config: &RuntimeConfig,
     grpc_url: &str,
@@ -188,8 +218,8 @@ pub fn presign(
         epoch: 1,
         chain_id: ChainId::Solana,
         intended_chain_sender: payer_pubkey.to_bytes().to_vec(),
-        request: DWalletRequest::PresignForDWallet {
-            dwallet_id: dwallet_addr.to_vec(),
+        request: DWalletRequest::Presign {
+            dwallet_network_encryption_public_key: vec![0u8; 32],
             curve,
             signature_algorithm: algo,
         },
@@ -197,7 +227,13 @@ pub fn presign(
 
     let response = grpc_call(grpc_url, build_signed_request(&payer_pubkey, request))?;
     match response {
-        TransactionResponseData::Presign { presign_id, .. } => Ok(presign_id),
+        TransactionResponseData::Attestation(att) => {
+            let versioned: VersionedPresignDataAttestation =
+                bcs::from_bytes(&att.attestation_data)
+                    .with_context(|| "failed to decode presign attestation")?;
+            let VersionedPresignDataAttestation::V1(data) = versioned;
+            Ok(data.presign_session_identifier)
+        }
         TransactionResponseData::Error { message } => {
             Err(anyhow!("gRPC presign failed: {message}"))
         }
@@ -211,11 +247,10 @@ pub fn sign(
     config: &RuntimeConfig,
     grpc_url: &str,
     dwallet_addr: [u8; 32],
-    curve: DWalletCurve,
-    algo: DWalletSignatureAlgorithm,
-    hash_scheme: DWalletHashScheme,
-    presign_id: Vec<u8>,
+    dwallet_attestation: NetworkSignedAttestation,
+    presign_session_identifier: Vec<u8>,
     message: Vec<u8>,
+    message_metadata: Vec<u8>,
     quorum_tx_signature: Vec<u8>,
 ) -> Result<Vec<u8>> {
     let payer_pubkey = config.payer.pubkey();
@@ -226,11 +261,10 @@ pub fn sign(
         intended_chain_sender: payer_pubkey.to_bytes().to_vec(),
         request: DWalletRequest::Sign {
             message,
-            curve,
-            signature_algorithm: algo,
-            hash_scheme,
-            presign_id,
+            message_metadata,
+            presign_session_identifier,
             message_centralized_signature: vec![0u8; 64],
+            dwallet_attestation,
             approval_proof: ApprovalProof::Solana {
                 transaction_signature: quorum_tx_signature,
                 slot: 0,
@@ -334,21 +368,13 @@ pub fn poll_until(
 
 use crate::accounts::IntentAccount;
 
-/// Build the destination-chain preimage for an intent. The bytes returned
-/// here are what gets sent in the gRPC `Sign` request as `message`; Ika
-/// hashes them with the configured `hash_scheme` and the result must equal
-/// the on-chain `MessageApproval.message_hash` derived by the program.
-///
-/// Mirrors `clear_wallet::chains::dispatch_sighash` but emits the *preimage*
-/// rather than the hash, so the caller can both (a) keccak/sha256d the bytes
-/// to derive the MessageApproval PDA address, and (b) ferry the bytes to Ika.
+/// Build the destination-chain preimage for an intent.
 pub fn build_chain_preimage(intent: &IntentAccount, params_data: &[u8]) -> Result<Vec<u8>> {
     let tx_template = read_tx_template(intent)?;
     match intent.chain_kind {
         1 => evm_native_preimage(intent, params_data, tx_template),
         4 => evm_erc20_preimage(intent, params_data, tx_template),
         2 => bitcoin_p2wpkh_preimage(intent, params_data, tx_template),
-        // 3 is reserved for `zcash_transparent` — see clear-wallet docs.
         0 => Err(anyhow!("solana intents are executed locally, not via Ika")),
         n => Err(anyhow!("unknown chain_kind {n}")),
     }
@@ -381,7 +407,6 @@ fn evm_native_preimage(intent: &IntentAccount, params_data: &[u8], tx_template: 
     let to = read_param_bytes20(intent, params_data, 1)?;
     let value = read_param_u64(intent, params_data, 2)?;
     let data_param = read_param_raw(intent, params_data, 3)?;
-    // String params: 1 length byte + bytes
     let data = if data_param.is_empty() {
         Vec::new()
     } else {
@@ -512,8 +537,7 @@ pub(crate) fn read_param_bytes32(intent: &IntentAccount, params_data: &[u8], idx
     Ok(out)
 }
 
-/// Keccak256 of a byte slice — used to derive the MessageApproval PDA from
-/// EVM/ERC-20 preimages, which `clear_wallet::chains::evm` produces too.
+/// Keccak256 of a byte slice.
 pub fn keccak256(data: &[u8]) -> [u8; 32] {
     use tiny_keccak::{Hasher, Keccak};
     let mut h = Keccak::v256();
@@ -533,44 +557,30 @@ pub fn sha256d(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// Compute the on-chain `MessageApproval.message_hash` for a preimage.
+/// Compute the on-chain `MessageApproval.message_digest` for a preimage.
 ///
-/// **Always `keccak256(preimage)` regardless of `chain_kind`.** This matches
-/// the on-chain `clear_wallet::chains::dispatch_sighash`, which now also
-/// returns `keccak256(preimage)` uniformly. The hash is purely a uniqueness
-/// key for the `MessageApproval` PDA — the dwallet program treats it as
-/// opaque 32 bytes — and using `keccak256` everywhere lets the dwallet
-/// program stay chain-agnostic and reuse Solana's cheap on-chain `keccak`
-/// syscall.
-///
-/// The chain-specific signing digest (e.g. `sha256d` for Bitcoin BIP143) is
-/// computed by the dwallet network off-chain via the `hash_scheme` field on
-/// the gRPC `Sign` request — see [`signing_params`].
+/// Always `keccak256(preimage)` regardless of `chain_kind`. The chain-specific
+/// signing digest (e.g. `sha256d` for Bitcoin BIP143) is computed by the
+/// dwallet network off-chain via the `DWalletSignatureScheme` on the gRPC
+/// `Sign` request.
 pub fn hash_preimage(_chain_kind: u8, preimage: &[u8]) -> [u8; 32] {
     keccak256(preimage)
 }
 
 // ── Curve / scheme defaults per chain_kind ──
 
-/// Returns the curve, signature algorithm, and hash scheme that match the
-/// destination chain. Per Ika docs the pre-alpha network supports BOTH
-/// Curve25519+EdDSA AND Secp256k1+ECDSA, so each chain uses its native curve.
-///
-/// `force_curve25519` is an escape hatch left in for debugging the gRPC
-/// happy path with the simplest possible curve; you should normally leave
-/// it `false` so EVM/BTC use real secp256k1.
+/// Returns the curve and combined signature scheme that match the destination
+/// chain. The `DWalletSignatureScheme` replaces the old separate
+/// `(DWalletSignatureAlgorithm, DWalletHashScheme)` tuple.
 pub fn signing_params(
     chain_kind: u8,
     force_curve25519: bool,
-) -> (DWalletCurve, DWalletSignatureAlgorithm, DWalletHashScheme) {
+) -> (DWalletCurve, DWalletSignatureAlgorithm, DWalletSignatureScheme) {
     if force_curve25519 {
-        // Ed25519 only accepts SHA512 — that's the hash function baked into
-        // the algorithm itself (RFC 8032). The mock rejects any other scheme
-        // for Ed25519 signing requests.
         return (
             DWalletCurve::Curve25519,
             DWalletSignatureAlgorithm::EdDSA,
-            DWalletHashScheme::SHA512,
+            DWalletSignatureScheme::EddsaSha512,
         );
     }
     match chain_kind {
@@ -578,22 +588,19 @@ pub fn signing_params(
         1 | 4 => (
             DWalletCurve::Secp256k1,
             DWalletSignatureAlgorithm::ECDSASecp256k1,
-            DWalletHashScheme::Keccak256,
+            DWalletSignatureScheme::EcdsaKeccak256,
         ),
         // BitcoinP2wpkh (2) — sha256d of BIP143 preimage, secp256k1 ECDSA.
         2 => (
             DWalletCurve::Secp256k1,
             DWalletSignatureAlgorithm::ECDSASecp256k1,
-            DWalletHashScheme::DoubleSHA256,
+            DWalletSignatureScheme::EcdsaDoubleSha256,
         ),
-        // 3 reserved for ZcashTransparent (ZIP-244 NU5+) — needs personalized
-        // BLAKE2b-256 in `DWalletHashScheme`, not implemented yet.
-        // Fall-through Ed25519 defaults to SHA512 because that's the only
-        // hash scheme the dwallet network accepts for Ed25519 (RFC 8032).
+        // Default: Ed25519 + SHA512.
         _ => (
             DWalletCurve::Curve25519,
             DWalletSignatureAlgorithm::EdDSA,
-            DWalletHashScheme::SHA512,
+            DWalletSignatureScheme::EddsaSha512,
         ),
     }
 }
