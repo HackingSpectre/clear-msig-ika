@@ -16,6 +16,8 @@ use serde::Serialize;
 
 pub mod bitcoin;
 pub mod evm;
+pub mod solana_broadcast;
+pub mod zcash;
 
 /// Chain-specific data the broadcast layer needs in addition to the
 /// `(preimage, signature, pubkey)` triple. EVM is purely defined by the
@@ -25,6 +27,11 @@ pub mod evm;
 /// to assemble the actual segwit transaction we need the original outputs
 /// back, so they're plumbed in here from the proposal's params.
 pub enum BroadcastInputs {
+    /// Solana SOL transfer via dWallet Ed25519 signature.
+    Solana {
+        destination: [u8; 32],
+        amount_lamports: u64,
+    },
     /// EVM EIP-1559 native transfer or ERC-20 — nothing extra needed.
     Evm,
     /// Bitcoin P2WPKH single-input single-output spend.
@@ -35,6 +42,18 @@ pub enum BroadcastInputs {
         recipient_pkh: [u8; 20],
         send_amount_sats: u64,
         lock_time: u32,
+    },
+    /// Zcash transparent P2PKH single-input single-output spend.
+    ZcashTransparent {
+        header: u32,
+        version_group_id: u32,
+        prev_txid: [u8; 32],
+        prev_vout: u32,
+        sender_pkh: [u8; 20],
+        recipient_pkh: [u8; 20],
+        send_amount_zat: u64,
+        lock_time: u32,
+        expiry_height: u32,
     },
 }
 
@@ -86,6 +105,19 @@ pub fn broadcast_signed_tx(
     s.copy_from_slice(&signature[32..]);
 
     match chain_kind {
+        // 0 = solana — Ed25519 signed transaction.
+        0 => {
+            let BroadcastInputs::Solana { destination, amount_lamports } = inputs else {
+                return Err(anyhow!("solana chain_kind requires BroadcastInputs::Solana"));
+            };
+            solana_broadcast::assemble_and_broadcast(
+                destination,
+                amount_lamports,
+                signature,
+                dwallet_pubkey_compressed,
+                rpc_url,
+            )
+        }
         // 1 = evm_1559, 4 = evm_1559_erc20 — same EIP-1559 envelope.
         1 | 4 => {
             if !matches!(inputs, BroadcastInputs::Evm) {
@@ -123,11 +155,34 @@ pub fn broadcast_signed_tx(
                 rpc_url,
             )
         }
-        // 3 reserved for ZcashTransparent — needs personalized BLAKE2b-256.
+        // 3 = zcash_transparent — P2PKH assembly + lightwalletd or Zcash RPC.
+        3 => {
+            let BroadcastInputs::ZcashTransparent {
+                header, version_group_id,
+                prev_txid, prev_vout, sender_pkh,
+                recipient_pkh, send_amount_zat,
+                lock_time, expiry_height,
+            } = inputs
+            else {
+                return Err(anyhow!(
+                    "zcash_transparent chain_kind requires BroadcastInputs::ZcashTransparent"
+                ));
+            };
+            zcash::assemble_and_broadcast(
+                zcash::SpendInputs {
+                    header, version_group_id,
+                    prev_txid, prev_vout, sender_pkh,
+                    recipient_pkh, send_amount_zat,
+                    lock_time, expiry_height,
+                },
+                &r, &s,
+                dwallet_pubkey_compressed,
+                rpc_url,
+            )
+        }
         // 0 = solana — local CPI executor, never goes through this path.
         n => Err(anyhow!(
-            "broadcast not implemented for chain_kind {n} \
-             (use --broadcast only with EVM or Bitcoin chains)"
+            "broadcast not implemented for chain_kind {n}"
         )),
     }
 }

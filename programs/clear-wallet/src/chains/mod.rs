@@ -47,22 +47,22 @@ use crate::utils::keccak::keccak256;
 
 pub mod bitcoin;
 pub mod evm;
+pub mod solana_dwallet;
+pub mod zcash;
 
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChainKind {
-    /// Local Solana CPI execution (uses the existing `execute` path; never
-    /// goes through `ika_sign`).
+    /// Solana via Ika dWallet (Ed25519/Curve25519). The dWallet pubkey IS
+    /// the Solana address. Signed by the dWallet network with `EddsaSha512`.
     Solana = 0,
     /// EVM EIP-1559 native-token transfer (ETH/native gas-token send).
     Evm1559 = 1,
     /// Bitcoin P2WPKH (single-input, single-output) BIP143 sighash.
     BitcoinP2wpkh = 2,
-    /// **Reserved for Zcash transparent (ZIP-244 NU5+).** Not implemented —
-    /// adding it requires the dwallet network to support personalized
-    /// `BLAKE2b-256` as a `DWalletHashScheme` variant. The discriminant is
-    /// kept reserved to avoid silent re-numbering if other chains land first.
-    Reserved3 = 3,
+    /// Zcash transparent P2PKH (single-input, single-output). Uses BLAKE2b-256
+    /// with personalized "ZcashSigHash" || consensus_branch_id for signing.
+    ZcashTransparent = 3,
     /// EVM EIP-1559 ERC-20 token transfer. Same envelope as `Evm1559`, but
     /// the calldata is `transfer(address,uint256)` constructed on-chain from
     /// typed (recipient, amount) params, so approvers can clear-sign
@@ -84,15 +84,15 @@ impl ChainKind {
             0 => Ok(Self::Solana),
             1 => Ok(Self::Evm1559),
             2 => Ok(Self::BitcoinP2wpkh),
-            // 3 is reserved for Zcash transparent — not implemented yet.
+            3 => Ok(Self::ZcashTransparent),
             4 => Ok(Self::Evm1559Erc20),
             _ => Err(ProgramError::InvalidInstructionData),
         }
     }
 
-    /// Whether this chain goes through `ika_sign` rather than `execute`.
+    /// All chains go through `ika_sign`.
     pub fn is_remote(self) -> bool {
-        !matches!(self, Self::Solana)
+        true
     }
 }
 
@@ -112,11 +112,19 @@ pub fn dispatch_sighash(
     intent: &Intent<'_>,
     params_data: &[u8],
     tx_template: &[u8],
+    blake2b_hashes: &[u8; 96],
+    signer_pubkey: Option<&[u8; 32]>,
 ) -> Result<[u8; 32], ProgramError> {
     let kind = ChainKind::from_u8(intent.chain_kind)?;
     let mut buf = [0u8; MAX_PREIMAGE_LEN];
     let preimage_len = match kind {
-        ChainKind::Solana => return Err(ProgramError::InvalidArgument),
+        ChainKind::Solana => {
+            if let Some(pk) = signer_pubkey {
+                solana_dwallet::build_tx_message(intent, params_data, tx_template, pk, &mut buf)?
+            } else {
+                solana_dwallet::build_preimage(intent, params_data, tx_template, &mut buf)?
+            }
+        }
         ChainKind::Evm1559 => {
             evm::build_preimage(intent, params_data, tx_template, &mut buf)?
         }
@@ -126,9 +134,53 @@ pub fn dispatch_sighash(
         ChainKind::BitcoinP2wpkh => {
             bitcoin::build_preimage(intent, params_data, tx_template, &mut buf)?
         }
-        ChainKind::Reserved3 => return Err(ProgramError::InvalidArgument),
+        ChainKind::ZcashTransparent => {
+            if *blake2b_hashes != [0u8; 96] {
+                zcash::build_zip243_preimage(intent, params_data, tx_template, blake2b_hashes, &mut buf)?
+            } else {
+                zcash::build_preimage(intent, params_data, tx_template, &mut buf)?
+            }
+        }
     };
     Ok(keccak256(&buf[..preimage_len]))
+}
+
+/// Build the `message_metadata_digest` for the MessageApproval PDA.
+///
+/// For Zcash: BCS-serialize Blake2bMessageMetadata { personal, salt },
+/// then keccak256 the result. For all other chains: zeros.
+pub fn dispatch_metadata_digest(
+    chain_kind: u8,
+    tx_template: &[u8],
+) -> [u8; 32] {
+    let kind = match ChainKind::from_u8(chain_kind) {
+        Ok(k) => k,
+        Err(_) => return [0u8; 32],
+    };
+    match kind {
+        ChainKind::ZcashTransparent => {
+            if tx_template.len() < 20 {
+                return [0u8; 32];
+            }
+            let branch_id = u32::from_le_bytes(
+                tx_template[16..20].try_into().unwrap_or([0; 4]),
+            );
+            // "ZcashSigHash" (12 bytes) + branch_id LE (4 bytes) = 16 bytes
+            let mut personal = [0u8; 16];
+            personal[..12].copy_from_slice(b"ZcashSigHash");
+            personal[12..16].copy_from_slice(&branch_id.to_le_bytes());
+            // BCS-serialize Blake2bMessageMetadata { personal, salt: [] }
+            // BCS Vec<u8> = ULEB128 length + bytes
+            // personal: 16 bytes → ULEB128(16) = 0x10, then 16 bytes
+            // salt: 0 bytes → ULEB128(0) = 0x00
+            let mut bcs_buf = [0u8; 19]; // 1 + 16 + 1 + 0 + 1 = worst case 19
+            bcs_buf[0] = 16; // personal length
+            bcs_buf[1..17].copy_from_slice(&personal);
+            bcs_buf[17] = 0; // salt length
+            keccak256(&bcs_buf[..18])
+        }
+        _ => [0u8; 32],
+    }
 }
 
 // --- Param-reading helpers shared by all chain serializers ---

@@ -97,17 +97,18 @@ fn pack_dwallet_seed_payload(curve: u16, public_key: &[u8]) -> Vec<u8> {
 }
 
 /// MessageApproval PDA — hierarchical seeds under the dWallet:
-/// `["dwallet", chunks(curve_u16_le || pk), "message_approval", &scheme_u16_le, &message_digest]`
+/// `["dwallet", chunks(curve_u16_le || pk), "message_approval", &scheme_u16_le, &message_digest, [&metadata_digest]]`
 pub fn message_approval_pda(
     dwallet_program: &Pubkey,
     curve: u16,
     public_key: &[u8],
     signature_scheme: u16,
     message_digest: &[u8; 32],
+    message_metadata_digest: &[u8; 32],
 ) -> (Pubkey, u8) {
     let payload = pack_dwallet_seed_payload(curve, public_key);
     let scheme_bytes = signature_scheme.to_le_bytes();
-    let mut seeds: Vec<&[u8]> = Vec::with_capacity(6);
+    let mut seeds: Vec<&[u8]> = Vec::with_capacity(7);
     seeds.push(b"dwallet");
     for chunk in payload.chunks(32) {
         seeds.push(chunk);
@@ -115,6 +116,9 @@ pub fn message_approval_pda(
     seeds.push(SEED_MESSAGE_APPROVAL);
     seeds.push(&scheme_bytes);
     seeds.push(message_digest);
+    if *message_metadata_digest != [0u8; 32] {
+        seeds.push(message_metadata_digest);
+    }
     Pubkey::find_program_address(&seeds, dwallet_program)
 }
 
@@ -222,7 +226,7 @@ pub fn dkg(
 ) -> Result<DkgResult> {
     let payer_pubkey = config.payer.pubkey();
     let request = SignedRequestData {
-        session_identifier_preimage: [0u8; 32],
+        session_identifier_preimage: payer_pubkey.to_bytes(),
         epoch: 1,
         chain_id: ChainId::Solana,
         intended_chain_sender: payer_pubkey.to_bytes().to_vec(),
@@ -427,10 +431,11 @@ use crate::accounts::IntentAccount;
 pub fn build_chain_preimage(intent: &IntentAccount, params_data: &[u8]) -> Result<Vec<u8>> {
     let tx_template = read_tx_template(intent)?;
     match intent.chain_kind {
+        0 => solana_dwallet_preimage(intent, params_data),
         1 => evm_native_preimage(intent, params_data, tx_template),
         4 => evm_erc20_preimage(intent, params_data, tx_template),
         2 => bitcoin_p2wpkh_preimage(intent, params_data, tx_template),
-        0 => Err(anyhow!("solana intents are executed locally, not via Ika")),
+        3 => zcash_transparent_preimage(intent, params_data, tx_template),
         n => Err(anyhow!("unknown chain_kind {n}")),
     }
 }
@@ -445,6 +450,87 @@ fn read_tx_template(intent: &IntentAccount) -> Result<&[u8]> {
         .byte_pool
         .get(off..off + len)
         .ok_or(anyhow!("tx_template offset/len out of bounds"))
+}
+
+// Solana dWallet — simplified preimage matching on-chain builder.
+fn solana_dwallet_preimage(intent: &IntentAccount, params_data: &[u8]) -> Result<Vec<u8>> {
+    let destination = read_param_bytes32(intent, params_data, 0)?;
+    let amount = read_param_u64(intent, params_data, 1)?;
+    let nonce_value = read_param_bytes32(intent, params_data, 2)?;
+    let mut out = Vec::with_capacity(73);
+    out.push(0x00); // op = Solana transfer
+    out.extend_from_slice(&destination);
+    out.extend_from_slice(&amount.to_le_bytes());
+    out.extend_from_slice(&nonce_value);
+    Ok(out)
+}
+
+/// Build the actual Solana transaction message bytes for signing via Ika.
+/// Uses durable nonce so the message is deterministic.
+pub fn build_solana_tx_message(
+    from_pubkey: &[u8; 32],
+    destination: &[u8; 32],
+    amount: u64,
+    nonce_account: &[u8; 32],
+    nonce_value: &[u8; 32],
+) -> Vec<u8> {
+    // Accounts (sorted: signers first, then writable, then readonly):
+    // 0: from_pubkey       (signer=true,  writable=true)
+    // 1: nonce_account     (signer=false, writable=true)
+    // 2: destination       (signer=false, writable=true)
+    // 3: SysvarRecentBlockhashes (signer=false, readonly=true)
+    // 4: SystemProgram     (signer=false, readonly=true)
+    let sysvar_blockhashes: [u8; 32] = [
+        0x06, 0xa7, 0xd5, 0x17, 0x19, 0x2c, 0x56, 0x8e,
+        0xe0, 0x8a, 0x84, 0x5f, 0x73, 0xd2, 0x97, 0x88,
+        0xcf, 0x03, 0x5c, 0x31, 0x45, 0xb2, 0x1a, 0xb3,
+        0x44, 0xd8, 0x06, 0x2e, 0xa9, 0x40, 0x00, 0x00,
+    ];
+    let system_program: [u8; 32] = [0u8; 32];
+
+    let mut msg = Vec::with_capacity(256);
+
+    // Header
+    msg.push(1);  // num_required_signatures
+    msg.push(0);  // num_readonly_signed_accounts
+    msg.push(2);  // num_readonly_unsigned_accounts (sysvar + system_program)
+
+    // Account keys (compact-u16 length = 5)
+    msg.push(5);
+    msg.extend_from_slice(from_pubkey);
+    msg.extend_from_slice(nonce_account);
+    msg.extend_from_slice(destination);
+    msg.extend_from_slice(&sysvar_blockhashes);
+    msg.extend_from_slice(&system_program);
+
+    // Recent blockhash = nonce value
+    msg.extend_from_slice(nonce_value);
+
+    // Instructions (compact-u16 length = 2)
+    msg.push(2);
+
+    // Instruction 0: AdvanceNonceAccount
+    // program_id_index = 4 (system_program)
+    msg.push(4);
+    // accounts: [1(nonce), 3(sysvar), 0(authority/signer)]
+    msg.push(3); // compact-u16 length
+    msg.extend_from_slice(&[1, 3, 0]);
+    // data: [4, 0, 0, 0] = AdvanceNonceAccount instruction index
+    msg.push(4); // compact-u16 length
+    msg.extend_from_slice(&[4, 0, 0, 0]);
+
+    // Instruction 1: Transfer
+    // program_id_index = 4 (system_program)
+    msg.push(4);
+    // accounts: [0(from), 2(to)]
+    msg.push(2); // compact-u16 length
+    msg.extend_from_slice(&[0, 2]);
+    // data: [2, 0, 0, 0, amount_le_u64] = Transfer instruction index + amount
+    msg.push(12); // compact-u16 length
+    msg.extend_from_slice(&2u32.to_le_bytes());
+    msg.extend_from_slice(&amount.to_le_bytes());
+
+    msg
 }
 
 // EVM 1559 native — see programs/clear-wallet/src/chains/evm.rs::build_sighash
@@ -521,6 +607,146 @@ fn bitcoin_p2wpkh_preimage(intent: &IntentAccount, params_data: &[u8], tx_templa
         sender_pkh, recipient_pkh, send_amount_sats,
     };
     Ok(spend.bip143_preimage())
+}
+
+/// Build the simplified Zcash preimage (same bytes as on-chain) for the
+/// MessageApproval PDA hash. The FULL ZIP-243 preimage is built separately
+/// by `build_zcash_zip243_preimage` for the gRPC Sign request.
+fn zcash_transparent_preimage(intent: &IntentAccount, params_data: &[u8], tx_template: &[u8]) -> Result<Vec<u8>> {
+    if tx_template.len() != 20 {
+        return Err(anyhow!("zcash_transparent tx_template must be 20 bytes, got {}", tx_template.len()));
+    }
+    let header = &tx_template[0..4];
+    let version_group_id = &tx_template[4..8];
+    let lock_time = &tx_template[8..12];
+    let expiry_height = &tx_template[12..16];
+
+    let prev_txid = read_param_bytes32(intent, params_data, 0)?;
+    let prev_vout = read_param_u64(intent, params_data, 1)? as u32;
+    let prev_amount = read_param_u64(intent, params_data, 2)?;
+    let sender_pkh = read_param_bytes20(intent, params_data, 3)?;
+    let recipient_pkh = read_param_bytes20(intent, params_data, 4)?;
+    let send_amount = read_param_u64(intent, params_data, 5)?;
+
+    // Same simplified preimage as the on-chain builder (112 bytes).
+    let mut out = Vec::with_capacity(112);
+    out.extend_from_slice(header);
+    out.extend_from_slice(version_group_id);
+    out.extend_from_slice(&prev_txid);
+    out.extend_from_slice(&prev_vout.to_le_bytes());
+    out.extend_from_slice(&prev_amount.to_le_bytes());
+    out.extend_from_slice(&sender_pkh);
+    out.extend_from_slice(&recipient_pkh);
+    out.extend_from_slice(&send_amount.to_le_bytes());
+    out.extend_from_slice(lock_time);
+    out.extend_from_slice(expiry_height);
+    out.extend_from_slice(&1u32.to_le_bytes()); // SIGHASH_ALL
+    Ok(out)
+}
+
+/// Build the FULL ZIP-243 sighash preimage for Zcash Sapling transparent
+/// P2PKH. This is what gets sent to the dWallet network as the `message`
+/// in the gRPC Sign request. The network then hashes it with
+/// `BLAKE2b-256("ZcashSigHash" || branch_id, preimage)` to produce the
+/// signing digest.
+///
+/// Requires the `blake2b_simd` crate (available via the `blake2` feature).
+pub fn build_zcash_zip243_preimage(
+    intent: &IntentAccount,
+    params_data: &[u8],
+) -> Result<Vec<u8>> {
+    let tx_template = read_tx_template(intent)?;
+    if tx_template.len() != 20 {
+        return Err(anyhow!("zcash tx_template must be 20 bytes"));
+    }
+    let header = &tx_template[0..4];
+    let version_group_id = &tx_template[4..8];
+    let lock_time = &tx_template[8..12];
+    let expiry_height = &tx_template[12..16];
+
+    let prev_txid = read_param_bytes32(intent, params_data, 0)?;
+    let prev_vout = read_param_u64(intent, params_data, 1)? as u32;
+    let prev_amount = read_param_u64(intent, params_data, 2)?;
+    let sender_pkh = read_param_bytes20(intent, params_data, 3)?;
+    let recipient_pkh = read_param_bytes20(intent, params_data, 4)?;
+    let send_amount = read_param_u64(intent, params_data, 5)?;
+
+    let sighash_type: u32 = 1; // SIGHASH_ALL
+    let sequence: u32 = 0xfffffffe;
+
+    // outpoint = prev_txid(32) || prev_vout(4)
+    let mut outpoint = [0u8; 36];
+    outpoint[..32].copy_from_slice(&prev_txid);
+    outpoint[32..36].copy_from_slice(&prev_vout.to_le_bytes());
+
+    // hashPrevouts = BLAKE2b-256("ZcashPrevoutHash", outpoint)
+    let hash_prevouts = blake2b_personal(b"ZcashPrevoutHash", &outpoint);
+    // hashSequence = BLAKE2b-256("ZcashSequencHash", sequence_le)
+    let hash_sequence = blake2b_personal(b"ZcashSequencHash", &sequence.to_le_bytes());
+    // hashOutputs = BLAKE2b-256("ZcashOutputsHash", output_serialized)
+    // P2PKH output: amount(8) || script_len(1=25) || OP_DUP OP_HASH160 push20 {pkh} OP_EQUALVERIFY OP_CHECKSIG
+    let mut output_buf = Vec::with_capacity(34);
+    output_buf.extend_from_slice(&send_amount.to_le_bytes());
+    output_buf.push(25); // script length
+    output_buf.push(0x76); // OP_DUP
+    output_buf.push(0xa9); // OP_HASH160
+    output_buf.push(0x14); // push 20 bytes
+    output_buf.extend_from_slice(&recipient_pkh);
+    output_buf.push(0x88); // OP_EQUALVERIFY
+    output_buf.push(0xac); // OP_CHECKSIG
+    let hash_outputs = blake2b_personal(b"ZcashOutputsHash", &output_buf);
+
+    // scriptCode for P2PKH input: 0x1976a914{sender_pkh}88ac (26 bytes)
+    let mut script_code = [0u8; 26];
+    script_code[0] = 0x19; // varint 25
+    script_code[1] = 0x76; // OP_DUP
+    script_code[2] = 0xa9; // OP_HASH160
+    script_code[3] = 0x14; // push20
+    script_code[4..24].copy_from_slice(&sender_pkh);
+    script_code[24] = 0x88; // OP_EQUALVERIFY
+    script_code[25] = 0xac; // OP_CHECKSIG
+
+    // Assemble the full ZIP-243 preimage (transparent-only, no shielded).
+    let mut preimage = Vec::with_capacity(294);
+    preimage.extend_from_slice(header);           // 4
+    preimage.extend_from_slice(version_group_id); // 4
+    preimage.extend_from_slice(&hash_prevouts);   // 32
+    preimage.extend_from_slice(&hash_sequence);   // 32
+    preimage.extend_from_slice(&hash_outputs);    // 32
+    preimage.extend_from_slice(&[0u8; 32]);       // hashJoinSplits (none)
+    preimage.extend_from_slice(&[0u8; 32]);       // hashShieldedSpends (none)
+    preimage.extend_from_slice(&[0u8; 32]);       // hashShieldedOutputs (none)
+    preimage.extend_from_slice(lock_time);        // 4
+    preimage.extend_from_slice(expiry_height);    // 4
+    preimage.extend_from_slice(&0i64.to_le_bytes()); // valueBalance = 0 (transparent-only)
+    preimage.extend_from_slice(&sighash_type.to_le_bytes()); // 4
+    preimage.extend_from_slice(&outpoint);        // 36
+    preimage.extend_from_slice(&script_code);     // 26
+    preimage.extend_from_slice(&prev_amount.to_le_bytes()); // 8
+    preimage.extend_from_slice(&sequence.to_le_bytes());    // 4
+
+    Ok(preimage)
+}
+
+/// BLAKE2b-256 with a personalization string.
+fn blake2b_personal(personal: &[u8], data: &[u8]) -> [u8; 32] {
+    use blake2b_simd::Params;
+    let h = Params::new()
+        .hash_length(32)
+        .personal(personal)
+        .hash(data);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.as_bytes());
+    out
+}
+
+/// Build the BLAKE2b personalization string for the final Zcash sighash:
+/// "ZcashSigHash" (12 bytes) || consensus_branch_id (4 bytes LE) = 16 bytes.
+pub fn zcash_sighash_personal(consensus_branch_id: u32) -> Vec<u8> {
+    let mut personal = Vec::with_capacity(16);
+    personal.extend_from_slice(b"ZcashSigHash");
+    personal.extend_from_slice(&consensus_branch_id.to_le_bytes());
+    personal
 }
 
 // ── Param readers (mirror programs/clear-wallet/src/chains/mod.rs) ──
@@ -622,6 +848,61 @@ pub fn hash_preimage(_chain_kind: u8, preimage: &[u8]) -> [u8; 32] {
     keccak256(preimage)
 }
 
+/// Compute the 3 BLAKE2b sub-hashes for Zcash ZIP-243: [hashPrevouts || hashSequence || hashOutputs].
+pub fn compute_zcash_blake2b_hashes(
+    intent: &IntentAccount,
+    params_data: &[u8],
+) -> Result<[u8; 96]> {
+    let prev_txid = read_param_bytes32(intent, params_data, 0)?;
+    let prev_vout = read_param_u64(intent, params_data, 1)? as u32;
+    let recipient_pkh = read_param_bytes20(intent, params_data, 4)?;
+    let send_amount = read_param_u64(intent, params_data, 5)?;
+
+    let sequence: u32 = 0xfffffffe;
+
+    let mut outpoint = [0u8; 36];
+    outpoint[..32].copy_from_slice(&prev_txid);
+    outpoint[32..36].copy_from_slice(&prev_vout.to_le_bytes());
+
+    let hash_prevouts = blake2b_personal(b"ZcashPrevoutHash", &outpoint);
+    let hash_sequence = blake2b_personal(b"ZcashSequencHash", &sequence.to_le_bytes());
+
+    let mut output_buf = Vec::with_capacity(34);
+    output_buf.extend_from_slice(&send_amount.to_le_bytes());
+    output_buf.push(25);
+    output_buf.push(0x76);
+    output_buf.push(0xa9);
+    output_buf.push(0x14);
+    output_buf.extend_from_slice(&recipient_pkh);
+    output_buf.push(0x88);
+    output_buf.push(0xac);
+    let hash_outputs = blake2b_personal(b"ZcashOutputsHash", &output_buf);
+
+    let mut result = [0u8; 96];
+    result[0..32].copy_from_slice(&hash_prevouts);
+    result[32..64].copy_from_slice(&hash_sequence);
+    result[64..96].copy_from_slice(&hash_outputs);
+    Ok(result)
+}
+
+/// Compute the `message_metadata_digest` for the MA PDA.
+/// Non-zero only for Zcash (BLAKE2b personalization).
+pub fn metadata_digest(chain_kind: u8, tx_template: &[u8]) -> [u8; 32] {
+    if chain_kind != 3 || tx_template.len() < 20 {
+        return [0u8; 32];
+    }
+    let branch_id = u32::from_le_bytes(
+        tx_template[16..20].try_into().unwrap_or([0; 4]),
+    );
+    let personal = zcash_sighash_personal(branch_id);
+    let metadata = ika_dwallet_types::Blake2bMessageMetadata {
+        personal,
+        salt: vec![],
+    };
+    let bcs_bytes = bcs::to_bytes(&metadata).unwrap_or_default();
+    keccak256(&bcs_bytes)
+}
+
 // ── Curve / scheme defaults per chain_kind ──
 
 /// Returns the curve and combined signature scheme that match the destination
@@ -639,6 +920,12 @@ pub fn signing_params(
         );
     }
     match chain_kind {
+        // Solana (0) — Ed25519 + SHA512 (Curve25519 dWallet).
+        0 => (
+            DWalletCurve::Curve25519,
+            DWalletSignatureAlgorithm::EdDSA,
+            DWalletSignatureScheme::EddsaSha512,
+        ),
         // Evm1559 (1) / Evm1559Erc20 (4) — keccak256 of RLP, secp256k1 ECDSA.
         1 | 4 => (
             DWalletCurve::Secp256k1,
@@ -650,6 +937,12 @@ pub fn signing_params(
             DWalletCurve::Secp256k1,
             DWalletSignatureAlgorithm::ECDSASecp256k1,
             DWalletSignatureScheme::EcdsaDoubleSha256,
+        ),
+        // ZcashTransparent (3) — BLAKE2b-256 with personalized hash, secp256k1 ECDSA.
+        3 => (
+            DWalletCurve::Secp256k1,
+            DWalletSignatureAlgorithm::ECDSASecp256k1,
+            DWalletSignatureScheme::EcdsaBlake2b256,
         ),
         // Default: Ed25519 + SHA512.
         _ => (

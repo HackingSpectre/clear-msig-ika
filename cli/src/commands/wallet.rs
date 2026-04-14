@@ -90,13 +90,13 @@ pub enum WalletAction {
 /// Map a CLI `--chain` string to its on-chain `ChainKind` discriminant.
 fn parse_chain_kind(chain: &str) -> Result<u8> {
     match chain {
-        "solana"            => Ok(0),
-        "evm_1559"          => Ok(1),
-        "bitcoin_p2wpkh"    => Ok(2),
-        // 3 reserved for "zcash_transparent" — not implemented yet.
-        "evm_1559_erc20"    => Ok(4),
+        "solana"              => Ok(0),
+        "evm_1559"            => Ok(1),
+        "bitcoin_p2wpkh"      => Ok(2),
+        "zcash_transparent"   => Ok(3),
+        "evm_1559_erc20"      => Ok(4),
         other => Err(anyhow!(
-            "unknown chain '{other}' (expected one of: solana, evm_1559, evm_1559_erc20, bitcoin_p2wpkh)"
+            "unknown chain '{other}' (expected one of: solana, evm_1559, evm_1559_erc20, bitcoin_p2wpkh, zcash_transparent, solana_dwallet)"
         )),
     }
 }
@@ -106,6 +106,7 @@ fn chain_kind_name(k: u8) -> &'static str {
         0 => "solana",
         1 => "evm_1559",
         2 => "bitcoin_p2wpkh",
+        3 => "zcash_transparent",
         4 => "evm_1559_erc20",
         _ => "unknown",
     }
@@ -205,11 +206,6 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
             force_curve25519,
         } => {
             let chain_kind = parse_chain_kind(&chain)?;
-            if chain_kind == 0 {
-                return Err(anyhow!(
-                    "chain `solana` uses the local CPI executor — no Ika binding needed"
-                ));
-            }
             let dwallet_program_pk: Pubkey = dwallet_program
                 .parse()
                 .with_context(|| format!("invalid dWallet program ID: {dwallet_program}"))?;
@@ -425,7 +421,7 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
 
             // Probe each known chain_kind for an IkaConfig PDA.
             let mut chains = Vec::new();
-            for chain_kind in 1u8..=4 {
+            for chain_kind in 0u8..=4 {
                 let (cfg_pk, _) = ika::ika_config_pda(&program_id, &wallet_pubkey, chain_kind);
                 if let Some(data) = rpc::fetch_account_optional(&client, &cfg_pk)? {
                     if let Ok(cfg) = accounts::parse_ika_config(&data) {
@@ -455,6 +451,14 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                                     .collect::<String>();
                                 entry["secp256k1_pubkey_hex"] =
                                     serde_json::Value::String(pk_hex);
+                                // Solana dWallet: 32-byte Ed25519 pubkey IS the Solana address.
+                                if chain_kind == 0 && dw.public_key.len() == 32 {
+                                    let sol_addr = solana_sdk::pubkey::Pubkey::new_from_array(
+                                        dw.public_key[..32].try_into().unwrap()
+                                    );
+                                    entry["solana_address"] =
+                                        serde_json::Value::String(sol_addr.to_string());
+                                }
                                 if dw.public_key.len() == 33 {
                                     match chain_kind {
                                         // 1 = evm_1559, 4 = evm_1559_erc20 — both use the
@@ -487,7 +491,23 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                                                     serde_json::Value::String(addr);
                                             }
                                         }
-                                        // 3 reserved for `zcash_transparent` — not implemented.
+                                        // 3 = zcash_transparent
+                                        3 => {
+                                            if let Ok(addr) = accounts::zcash_transparent_address(
+                                                &dw.public_key,
+                                                true,
+                                            ) {
+                                                entry["zcash_t_addr_mainnet"] =
+                                                    serde_json::Value::String(addr);
+                                            }
+                                            if let Ok(addr) = accounts::zcash_transparent_address(
+                                                &dw.public_key,
+                                                false,
+                                            ) {
+                                                entry["zcash_t_addr_testnet"] =
+                                                    serde_json::Value::String(addr);
+                                            }
+                                        }
                                         _ => {}
                                     }
                                 }

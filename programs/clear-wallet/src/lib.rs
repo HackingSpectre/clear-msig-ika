@@ -92,6 +92,8 @@ pub mod clear_wallet {
         })
     }
 
+    /// Execute meta-intents (AddIntent, RemoveIntent, UpdateIntent).
+    /// Custom intents go through `ika_sign` instead.
     #[instruction(discriminator = 4)]
     pub fn execute(ctx: CtxWithRemaining<Execute>) -> Result<(), ProgramError> {
         ctx.accounts
@@ -124,10 +126,12 @@ pub mod clear_wallet {
         ctx: Ctx<IkaSign>,
         message_approval_bump: u8,
         cpi_authority_bump: u8,
+        blake2b_hashes: [u8; 96],
     ) -> Result<(), ProgramError> {
         ctx.accounts.ika_sign(IkaSignArgs {
             message_approval_bump,
             cpi_authority_bump,
+            blake2b_hashes,
         })
     }
 }

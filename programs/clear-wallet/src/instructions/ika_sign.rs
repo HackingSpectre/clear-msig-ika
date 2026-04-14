@@ -75,6 +75,10 @@ pub struct IkaSign<'info> {
 pub struct IkaSignArgs {
     pub message_approval_bump: u8,
     pub cpi_authority_bump: u8,
+    /// Pre-computed BLAKE2b hashes for Zcash ZIP-243 preimage.
+    /// [hashPrevouts(32), hashSequence(32), hashOutputs(32)]
+    /// Empty/zeroed for non-Zcash chains.
+    pub blake2b_hashes: [u8; 96],
 }
 
 impl<'info> IkaSign<'info> {
@@ -128,7 +132,30 @@ impl<'info> IkaSign<'info> {
         // Build the destination-chain sighash from intent + proposal params.
         let params_data = self.proposal.params_data();
         let tx_template = self.intent.tx_template_bytes()?;
-        let message_hash = dispatch_sighash(&self.intent, params_data, tx_template)?;
+
+        // For Solana chain, read the dWallet's Ed25519 pubkey from the account.
+        // Layout: disc(1) + version(1) + authority(32) + curve(2) + state(1) +
+        //         pk_len(1) + pk(32 for Ed25519).
+        let signer_pubkey = if self.intent.chain_kind == 0 {
+            let dw = unsafe { self.dwallet.to_account_view().borrow_unchecked() };
+            if dw.len() >= 70 {
+                let mut pk = [0u8; 32];
+                pk.copy_from_slice(&dw[38..70]);
+                Some(pk)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let message_hash = dispatch_sighash(
+            &self.intent,
+            params_data,
+            tx_template,
+            &args.blake2b_hashes,
+            signer_pubkey.as_ref(),
+        )?;
 
         // CPI Ika `approve_message`.
         // Verify the program-wide CPI authority PDA (defense in depth).
@@ -170,9 +197,10 @@ impl<'info> IkaSign<'info> {
         };
 
         let user_pubkey: [u8; 32] = ika_config.user_pubkey.to_bytes();
-        // message_metadata_digest is all zeros for now (no per-scheme metadata
-        // needed for the chains we currently support).
-        let message_metadata_digest = [0u8; 32];
+        let message_metadata_digest = crate::chains::dispatch_metadata_digest(
+            self.intent.chain_kind,
+            tx_template,
+        );
         ctx.approve_message(
             self.coordinator.to_account_view(),
             self.message_approval.to_account_view(),

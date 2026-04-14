@@ -257,12 +257,10 @@ pub fn handle(action: ProposalAction, config: &RuntimeConfig) -> Result<()> {
             let intent_data = rpc::fetch_account(&client, &intent_pubkey)?;
             let intent_account = accounts::parse_intent(&intent_data)?;
 
-            // ── Dispatch on chain_kind ──
-            //
-            //  0  = Solana    → existing local-CPI executor (vault PDA signs)
-            //  1+ = remote    → on-chain `ika_sign` ix + Ika gRPC roundtrip
-            if intent_account.chain_kind == 0 {
-                // Local CPI executor — unchanged.
+            // Meta-intents (AddIntent=0, RemoveIntent=1, UpdateIntent=2) use
+            // the local execute instruction. Custom intents (3) go through
+            // Ika dWallet signing for all chains.
+            if intent_account.intent_type <= 2 {
                 let payer_pubkey = solana_sdk::signer::Signer::pubkey(&config.payer);
                 let remaining = resolve::resolve_remaining_accounts(
                     &client,
@@ -282,15 +280,13 @@ pub fn handle(action: ProposalAction, config: &RuntimeConfig) -> Result<()> {
                 let sig = rpc::send_instruction(&client, config, ix)?;
                 print_json(&serde_json::json!({
                     "txid": sig.to_string(),
-                    "path": "local-cpi",
+                    "path": "meta-intent",
                     "status": "executed",
                 }));
             } else {
-                // Remote-chain dWallet path.
                 let dwallet_program_pk: Pubkey = dwallet_program
                     .ok_or(anyhow!(
-                        "remote-chain proposal (chain_kind={}) requires --dwallet-program",
-                        intent_account.chain_kind
+                        "proposal execution requires --dwallet-program",
                     ))?
                     .parse()
                     .with_context(|| "invalid dWallet program ID")?;
@@ -441,6 +437,7 @@ fn execute_via_ika(
     broadcast: bool,
 ) -> Result<()> {
     use crate::ika;
+    use ika_dwallet_types::VersionedDWalletDataAttestation;
     use std::time::Duration;
 
     let chain_kind = intent_account.chain_kind;
@@ -462,8 +459,36 @@ fn execute_via_ika(
     let dwallet_pk: Pubkey = cfg.dwallet.parse().context("invalid dwallet in IkaConfig")?;
     eprintln!("✓ IkaConfig: {ika_config_pk} → dWallet {dwallet_pk}");
 
-    // 2. Build the off-chain preimage and derive the message hash.
-    let preimage = ika::build_chain_preimage(intent_account, &proposal_account.params_data)?;
+    // 2. Resolve signing params and fetch the dWallet pubkey.
+    let (curve, algo, scheme) = ika::signing_params(chain_kind, force_curve25519);
+    let curve_u16 = ika::curve_u16(curve);
+    let scheme_u16 = scheme as u16;
+
+    let dwallet_data = rpc::fetch_account(client, &dwallet_pk).with_context(|| {
+        format!("failed to fetch dwallet account {dwallet_pk}")
+    })?;
+    let dwallet_account = accounts::parse_dwallet(&dwallet_data)?;
+
+    // 3. Build the off-chain preimage and derive the message hash.
+    //    For Solana: full tx message (needs dWallet pubkey).
+    //    For Zcash: full ZIP-243 preimage.
+    //    For others: chain-native preimage.
+    let preimage = match chain_kind {
+        0 => {
+            let dest = ika::read_param_bytes32(intent_account, &proposal_account.params_data, 0)?;
+            let amt = ika::read_param_u64(intent_account, &proposal_account.params_data, 1)?;
+            let nonce_val = ika::read_param_bytes32(intent_account, &proposal_account.params_data, 2)?;
+            let off = intent_account.tx_template_offset as usize;
+            let nonce_acct: [u8; 32] = intent_account.byte_pool[off..off + 32]
+                .try_into().map_err(|_| anyhow!("nonce_account read failed"))?;
+            ika::build_solana_tx_message(
+                &dwallet_account.public_key[..32].try_into().unwrap(),
+                &dest, amt, &nonce_acct, &nonce_val,
+            )
+        }
+        3 => ika::build_zcash_zip243_preimage(intent_account, &proposal_account.params_data)?,
+        _ => ika::build_chain_preimage(intent_account, &proposal_account.params_data)?,
+    };
     let message_hash = ika::hash_preimage(chain_kind, &preimage);
     eprintln!(
         "✓ Built {}-byte preimage, hash {}",
@@ -471,25 +496,25 @@ fn execute_via_ika(
         hex_lower(&message_hash)
     );
 
-    // 3. Resolve signing params and the dWallet's public key for PDA derivation.
-    let (curve, algo, scheme) = ika::signing_params(chain_kind, force_curve25519);
-    let curve_u16 = ika::curve_u16(curve);
-    let scheme_u16 = scheme as u16;
-
-    // Read the dWallet account to get the full public key for PDA derivation.
-    let dwallet_data = rpc::fetch_account(client, &dwallet_pk).with_context(|| {
-        format!("failed to fetch dwallet account {dwallet_pk}")
-    })?;
-    let dwallet_account = accounts::parse_dwallet(&dwallet_data)?;
-
     // 4. Resolve the MessageApproval PDA + bump using hierarchical seeds.
+    let tt_off = intent_account.tx_template_offset as usize;
+    let tt_len = intent_account.tx_template_len as usize;
+    let tx_template = &intent_account.byte_pool[tt_off..tt_off + tt_len];
+    let meta_digest = ika::metadata_digest(intent_account.chain_kind, tx_template);
     let (message_approval_pk, message_approval_bump) =
-        ika::message_approval_pda(&dwallet_program, curve_u16, &dwallet_account.public_key, scheme_u16, &message_hash);
+        ika::message_approval_pda(&dwallet_program, curve_u16, &dwallet_account.public_key, scheme_u16, &message_hash, &meta_digest);
     let (coordinator_pk, _) = ika::coordinator_pda(&dwallet_program);
     let (cpi_authority_pk, cpi_authority_bump) = ika::cpi_authority_pda(&program_id);
     let (dwallet_ownership_pk, _) = ika::dwallet_ownership_pda(&program_id, &dwallet_pk);
 
-    // 5. Send the on-chain ika_sign instruction.
+    // 5. For Zcash, compute the BLAKE2b sub-hashes so the on-chain program
+    //    can build the full ZIP-243 preimage for the MA PDA.
+    let blake2b_hashes = if chain_kind == 3 {
+        ika::compute_zcash_blake2b_hashes(intent_account, &proposal_account.params_data)?
+    } else {
+        [0u8; 96]
+    };
+
     let payer_pubkey = solana_sdk::signer::Signer::pubkey(&config.payer);
     let ix = crate::instructions::ika_sign(
         payer_pubkey,
@@ -505,6 +530,7 @@ fn execute_via_ika(
         dwallet_program,
         message_approval_bump,
         cpi_authority_bump,
+        blake2b_hashes,
     );
     let quorum_tx_sig = rpc::send_instruction(client, config, ix)
         .with_context(|| "ika_sign failed")?;
@@ -521,18 +547,57 @@ fn execute_via_ika(
     eprintln!("✓ MessageApproval pending: {message_approval_pk}");
 
     // 7. gRPC: presign then sign.
-    // dWallet address bytes are the 32-byte session_identifier_preimage.
-    let pubkey_bytes = parse_hex_local(&cfg.user_pubkey)?;
-    let mut dwallet_addr_bytes = [0u8; 32];
-    let take = pubkey_bytes.len().min(32);
-    dwallet_addr_bytes[..take].copy_from_slice(&pubkey_bytes[..take]);
-
-    // Load the DKG attestation saved during `wallet add-chain`.
+    // Load the DKG attestation saved during `wallet add-chain` and use its
+    // session_identifier as the dwallet_addr — this must match the value
+    // the mock stored the key under during DKG.
     let dwallet_attestation = ika::load_attestation(_wallet_name)
         .with_context(|| "failed to load dWallet attestation")?;
+    let dwallet_addr_bytes = {
+        let versioned: VersionedDWalletDataAttestation =
+            bcs::from_bytes(&dwallet_attestation.attestation_data)
+                .with_context(|| "failed to decode dWallet attestation for session_identifier")?;
+        let VersionedDWalletDataAttestation::V1(data) = versioned;
+        data.session_identifier
+    };
 
     let presign_id = ika::presign(config, grpc_url, dwallet_addr_bytes, curve, algo)?;
     eprintln!("✓ Presign allocated ({} bytes)", presign_id.len());
+
+    // Build the chain-specific message for the Sign request.
+    // For Solana: full tx message with durable nonce (what Ed25519 signs).
+    // For Zcash: full ZIP-243 preimage + BLAKE2b metadata.
+    // For EVM/BTC: the preimage itself.
+    let (sign_message, message_metadata) = match chain_kind {
+        0 => {
+            // Solana: build the actual transaction message.
+            let destination = ika::read_param_bytes32(intent_account, &proposal_account.params_data, 0)?;
+            let amount = ika::read_param_u64(intent_account, &proposal_account.params_data, 1)?;
+            let nonce_value = ika::read_param_bytes32(intent_account, &proposal_account.params_data, 2)?;
+            let off = intent_account.tx_template_offset as usize;
+            let nonce_account: [u8; 32] = intent_account.byte_pool[off..off + 32]
+                .try_into().map_err(|_| anyhow!("nonce_account read failed"))?;
+            let tx_msg = ika::build_solana_tx_message(
+                &dwallet_account.public_key[..32].try_into().unwrap(),
+                &destination, amount, &nonce_account, &nonce_value,
+            );
+            (tx_msg, vec![])
+        }
+        3 => {
+            let zip243 = ika::build_zcash_zip243_preimage(intent_account, &proposal_account.params_data)?;
+            let off = intent_account.tx_template_offset as usize;
+            let branch_id = u32::from_le_bytes(
+                intent_account.byte_pool[off + 16..off + 20].try_into().unwrap()
+            );
+            let personal = ika::zcash_sighash_personal(branch_id);
+            let metadata = ika_dwallet_types::Blake2bMessageMetadata {
+                personal,
+                salt: vec![],
+            };
+            (zip243, bcs::to_bytes(&metadata).unwrap_or_default())
+        }
+        _ => (preimage.clone(), vec![]),
+    };
+    let sign_message_for_broadcast = sign_message.clone();
 
     let signature = ika::sign(
         config,
@@ -540,8 +605,8 @@ fn execute_via_ika(
         dwallet_addr_bytes,
         dwallet_attestation,
         presign_id,
-        preimage.clone(),
-        vec![], // message_metadata — empty for EVM/BTC
+        sign_message,
+        message_metadata,
         quorum_tx_sig.as_ref().to_vec(),
     )?;
     eprintln!("✓ Signature received from Ika ({} bytes)", signature.len());
@@ -576,26 +641,50 @@ fn execute_via_ika(
     if broadcast {
         let rpc_url = rpc_url.expect("--broadcast already validated to require --rpc-url");
 
-        let inputs = build_broadcast_inputs(
-            chain_kind,
-            intent_account,
-            &proposal_account.params_data,
-        )?;
+        if chain_kind == 0 {
+            // Solana: assemble wire tx from sign_message + signature directly.
+            // Wire format: [1 (num_sigs compact-u16)] [64-byte sig] [message_bytes]
+            let mut wire_tx = Vec::with_capacity(1 + 64 + sign_message_for_broadcast.len());
+            wire_tx.push(1); // 1 signature (compact-u16)
+            wire_tx.extend_from_slice(&signature);
+            wire_tx.extend_from_slice(&sign_message_for_broadcast);
 
-        let result = crate::chains::broadcast_signed_tx(
-            chain_kind,
-            inputs,
-            &preimage,
-            onchain_sig,
-            &dwallet_account.public_key,
-            rpc_url,
-        )
-        .with_context(|| format!("broadcast to {rpc_url} failed"))?;
-        eprintln!("✓ Broadcast {}: {}", result.chain, result.tx_id);
-        if let Some(url) = &result.explorer_url {
-            eprintln!("  → {url}");
+            let sol_client = solana_client::rpc_client::RpcClient::new(rpc_url.to_string());
+            let tx: solana_sdk::transaction::Transaction =
+                bincode::deserialize(&wire_tx)
+                    .with_context(|| "failed to deserialize Solana transaction")?;
+            let tx_sig = sol_client
+                .send_and_confirm_transaction(&tx)
+                .with_context(|| "failed to send Solana transaction")?;
+            eprintln!("✓ Broadcast solana: {tx_sig}");
+            output["broadcast"] = serde_json::json!({
+                "chain": "solana",
+                "chain_kind": 0,
+                "tx_id": tx_sig.to_string(),
+                "raw_tx_hex": format!("0x{}", hex_lower(&wire_tx)),
+            });
+        } else {
+            let inputs = build_broadcast_inputs(
+                chain_kind,
+                intent_account,
+                &proposal_account.params_data,
+            )?;
+
+            let result = crate::chains::broadcast_signed_tx(
+                chain_kind,
+                inputs,
+                &preimage,
+                onchain_sig,
+                &dwallet_account.public_key,
+                rpc_url,
+            )
+            .with_context(|| format!("broadcast to {rpc_url} failed"))?;
+            eprintln!("✓ Broadcast {}: {}", result.chain, result.tx_id);
+            if let Some(url) = &result.explorer_url {
+                eprintln!("  → {url}");
+            }
+            output["broadcast"] = serde_json::to_value(&result)?;
         }
-        output["broadcast"] = serde_json::to_value(&result)?;
     }
 
     print_json(&output);
@@ -620,6 +709,11 @@ fn build_broadcast_inputs(
     use crate::ika;
 
     match chain_kind {
+        0 => {
+            let destination = ika::read_param_bytes32(intent, params_data, 0)?;
+            let amount_lamports = ika::read_param_u64(intent, params_data, 1)?;
+            Ok(BroadcastInputs::Solana { destination, amount_lamports })
+        }
         1 | 4 => Ok(BroadcastInputs::Evm),
         2 => {
             // Param schema (must match `clear_wallet::chains::bitcoin`):
@@ -662,6 +756,41 @@ fn build_broadcast_inputs(
                 recipient_pkh,
                 send_amount_sats,
                 lock_time,
+            })
+        }
+        3 => {
+            let prev_txid = ika::read_param_bytes32(intent, params_data, 0)?;
+            let prev_vout = ika::read_param_u64(intent, params_data, 1)? as u32;
+            let sender_pkh = ika::read_param_bytes20(intent, params_data, 3)?;
+            let recipient_pkh = ika::read_param_bytes20(intent, params_data, 4)?;
+            let send_amount_zat = ika::read_param_u64(intent, params_data, 5)?;
+
+            let off = intent.tx_template_offset as usize;
+            let len = intent.tx_template_len as usize;
+            if len != 20 {
+                return Err(anyhow!(
+                    "zcash_transparent tx_template must be 20 bytes, got {len}"
+                ));
+            }
+            let tt = intent
+                .byte_pool
+                .get(off..off + len)
+                .ok_or(anyhow!("tx_template OOB"))?;
+            let header = u32::from_le_bytes(tt[0..4].try_into().unwrap());
+            let version_group_id = u32::from_le_bytes(tt[4..8].try_into().unwrap());
+            let lock_time = u32::from_le_bytes(tt[8..12].try_into().unwrap());
+            let expiry_height = u32::from_le_bytes(tt[12..16].try_into().unwrap());
+
+            Ok(BroadcastInputs::ZcashTransparent {
+                header,
+                version_group_id,
+                prev_txid,
+                prev_vout,
+                sender_pkh,
+                recipient_pkh,
+                send_amount_zat,
+                lock_time,
+                expiry_height,
             })
         }
         n => Err(anyhow!(

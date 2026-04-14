@@ -239,6 +239,7 @@ pub fn ika_sign(
     dwallet_program: Pubkey,
     message_approval_bump: u8,
     cpi_authority_bump: u8,
+    blake2b_hashes: [u8; 96],
 ) -> Instruction {
     let ext_ix: solana_instruction_v3::Instruction = IkaSignInstruction {
         payer: pk_to_addr(payer),
@@ -256,6 +257,7 @@ pub fn ika_sign(
         system_program: pk_to_addr(solana_sdk::system_program::id()),
         message_approval_bump,
         cpi_authority_bump,
+        blake2b_hashes,
     }
     .into();
     sdk_ix_from_ext(ext_ix)

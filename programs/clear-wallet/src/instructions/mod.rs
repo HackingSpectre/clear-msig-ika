@@ -10,6 +10,8 @@ pub use approve::*;
 pub mod cancel;
 pub use cancel::*;
 
+// execute kept for meta-intents (AddIntent, RemoveIntent, UpdateIntent)
+// which modify on-chain state. Custom intents go through ika_sign.
 pub mod execute;
 pub use execute::*;
 

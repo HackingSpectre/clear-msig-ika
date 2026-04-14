@@ -1,0 +1,9 @@
+{
+  "chain": "solana",
+  "params": [
+    { "name": "destination",  "type": "address" },
+    { "name": "amount",       "type": "u64" },
+    { "name": "nonce_value",  "type": "bytes32" }
+  ],
+  "template": "transfer {1} lamports to {0}"
+}

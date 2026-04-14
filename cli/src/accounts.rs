@@ -315,6 +315,28 @@ pub fn bitcoin_p2wpkh_address(compressed: &[u8], hrp: &str) -> Result<String> {
         .map_err(|e| anyhow!("bech32 encode: {e}"))
 }
 
+/// Zcash transparent P2PKH address (base58check) from a 33-byte compressed
+/// secp256k1 pubkey. `mainnet` = true → `t1...`, false → `tm...`.
+pub fn zcash_transparent_address(compressed: &[u8], mainnet: bool) -> Result<String> {
+    if compressed.len() != 33 {
+        return Err(anyhow!(
+            "expected 33-byte compressed secp256k1 pubkey, got {}",
+            compressed.len()
+        ));
+    }
+    let h160 = hash160(compressed);
+    // Zcash t-addr version bytes: mainnet 0x1CB8, testnet 0x1D25
+    let version = if mainnet { [0x1C, 0xB8] } else { [0x1D, 0x25] };
+    let mut payload = Vec::with_capacity(2 + 20 + 4);
+    payload.extend_from_slice(&version);
+    payload.extend_from_slice(&h160);
+    // Double-SHA256 checksum
+    let hash1 = Sha256::digest(&payload);
+    let hash2 = Sha256::digest(&hash1);
+    payload.extend_from_slice(&hash2[..4]);
+    Ok(bs58::encode(&payload).into_string())
+}
+
 #[allow(dead_code)]
 fn _bech32_unused() {
     // Silence unused-import warnings if `Bech32` / `CheckedHrpstring` are not

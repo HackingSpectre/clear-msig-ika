@@ -18,6 +18,7 @@ pub struct IkaSignInstruction {
     pub system_program: Address,
     pub message_approval_bump: u8,
     pub cpi_authority_bump: u8,
+    pub blake2b_hashes: [u8; 96],
 }
 
 impl From<IkaSignInstruction> for Instruction {
@@ -40,6 +41,7 @@ impl From<IkaSignInstruction> for Instruction {
         let mut data = vec![7];
         wincode::serialize_into(&mut data, &ix.message_approval_bump).unwrap();
         wincode::serialize_into(&mut data, &ix.cpi_authority_bump).unwrap();
+        wincode::serialize_into(&mut data, &ix.blake2b_hashes).unwrap();
         Instruction {
             program_id: ID,
             accounts,

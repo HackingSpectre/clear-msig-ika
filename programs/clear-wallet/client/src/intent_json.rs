@@ -41,9 +41,7 @@ pub enum ChainKindJson {
     #[serde(rename = "evm_1559")]
     Evm1559,
     BitcoinP2wpkh,
-    // Discriminant 3 is reserved for `zcash_transparent` (ZIP-244, NU5+).
-    // Not currently exposed — adding it requires the dwallet network to
-    // support a personalized BLAKE2b-256 `DWalletHashScheme` variant.
+    ZcashTransparent,
     #[serde(rename = "evm_1559_erc20")]
     Evm1559Erc20,
 }
@@ -54,13 +52,13 @@ impl ChainKindJson {
             Self::Solana => 0,
             Self::Evm1559 => 1,
             Self::BitcoinP2wpkh => 2,
-            // 3 reserved for ZcashTransparent
+            Self::ZcashTransparent => 3,
             Self::Evm1559Erc20 => 4,
         }
     }
 
     pub fn is_remote(self) -> bool {
-        !matches!(self, Self::Solana)
+        true
     }
 
     /// True if the chain serializer reads any bytes from `tx_template`.
@@ -93,12 +91,30 @@ pub enum TxTemplateJson {
         sequence: u32,
         sighash_type: u32,
     },
+    /// Solana dWallet: 32 bytes (nonce account address).
+    Solana {
+        nonce_account: String,
+    },
+    /// Zcash Sapling transparent: 20 bytes total.
+    ZcashTransparent {
+        header: u32,
+        version_group_id: u32,
+        lock_time: u32,
+        expiry_height: u32,
+        consensus_branch_id: u32,
+    },
 }
 
 impl TxTemplateJson {
     /// Serialize into the binary format the program's chain serializer expects.
     pub fn encode(&self) -> Vec<u8> {
         match self {
+            Self::Solana { nonce_account } => {
+                let bytes = bs58::decode(nonce_account).into_vec()
+                    .expect("invalid nonce_account base58");
+                assert_eq!(bytes.len(), 32, "nonce_account must be 32 bytes");
+                bytes
+            }
             Self::Evm1559 { chain_id, gas_limit, max_priority_fee_per_gas, max_fee_per_gas } => {
                 let mut out = Vec::with_capacity(32);
                 out.extend_from_slice(&chain_id.to_le_bytes());
@@ -115,15 +131,25 @@ impl TxTemplateJson {
                 out.extend_from_slice(&sighash_type.to_le_bytes());
                 out
             }
+            Self::ZcashTransparent { header, version_group_id, lock_time, expiry_height, consensus_branch_id } => {
+                let mut out = Vec::with_capacity(20);
+                out.extend_from_slice(&header.to_le_bytes());
+                out.extend_from_slice(&version_group_id.to_le_bytes());
+                out.extend_from_slice(&lock_time.to_le_bytes());
+                out.extend_from_slice(&expiry_height.to_le_bytes());
+                out.extend_from_slice(&consensus_branch_id.to_le_bytes());
+                out
+            }
         }
     }
 
     pub fn matches_chain(&self, chain: ChainKindJson) -> bool {
         matches!(
             (self, chain),
-            // Evm1559 tx_template is reused for both native and ERC-20 — same envelope.
-            (Self::Evm1559 { .. }, ChainKindJson::Evm1559 | ChainKindJson::Evm1559Erc20)
+            (Self::Solana { .. }, ChainKindJson::Solana)
+                | (Self::Evm1559 { .. }, ChainKindJson::Evm1559 | ChainKindJson::Evm1559Erc20)
                 | (Self::BitcoinP2wpkh { .. }, ChainKindJson::BitcoinP2wpkh)
+                | (Self::ZcashTransparent { .. }, ChainKindJson::ZcashTransparent)
         )
     }
 }
