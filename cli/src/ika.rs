@@ -135,6 +135,61 @@ pub fn ika_config_pda(
     )
 }
 
+// ── Attestation persistence ──
+
+/// Directory for storing DKG attestations.
+fn attestation_dir() -> std::path::PathBuf {
+    let home = dirs::home_dir().unwrap_or_default();
+    home.join(".config/clear-msig/attestations")
+}
+
+/// Save a DKG attestation to disk keyed by wallet name.
+pub fn save_attestation(
+    wallet_name: &str,
+    attestation: &NetworkSignedAttestation,
+) -> Result<()> {
+    let dir = attestation_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{wallet_name}.json"));
+    let json = serde_json::json!({
+        "attestation_data": hex_encode_bytes(&attestation.attestation_data),
+        "network_signature": hex_encode_bytes(&attestation.network_signature),
+        "network_pubkey": hex_encode_bytes(&attestation.network_pubkey),
+        "epoch": attestation.epoch,
+    });
+    std::fs::write(&path, serde_json::to_string_pretty(&json)?)?;
+    Ok(())
+}
+
+/// Load a previously saved DKG attestation for a wallet.
+pub fn load_attestation(wallet_name: &str) -> Result<NetworkSignedAttestation> {
+    let path = attestation_dir().join(format!("{wallet_name}.json"));
+    let data = std::fs::read_to_string(&path)
+        .with_context(|| format!(
+            "no saved attestation for wallet '{wallet_name}' at {}; \
+             re-run `wallet add-chain` to generate one",
+            path.display()
+        ))?;
+    let json: serde_json::Value = serde_json::from_str(&data)?;
+    Ok(NetworkSignedAttestation {
+        attestation_data: hex_decode_field(&json, "attestation_data")?,
+        network_signature: hex_decode_field(&json, "network_signature")?,
+        network_pubkey: hex_decode_field(&json, "network_pubkey")?,
+        epoch: json["epoch"].as_u64().unwrap_or(1),
+    })
+}
+
+fn hex_encode_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn hex_decode_field(json: &serde_json::Value, field: &str) -> Result<Vec<u8>> {
+    let s = json[field].as_str().unwrap_or("");
+    (0..s.len() / 2)
+        .map(|i| u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|e| anyhow!("{e}")))
+        .collect()
+}
+
 // ── Setup probes ──
 
 /// Wait for the dWallet program's coordinator PDA to be initialized.

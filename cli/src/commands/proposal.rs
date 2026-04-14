@@ -527,15 +527,9 @@ fn execute_via_ika(
     let take = pubkey_bytes.len().min(32);
     dwallet_addr_bytes[..take].copy_from_slice(&pubkey_bytes[..take]);
 
-    // We need the dWallet attestation for the Sign request. For now we
-    // construct a dummy attestation — in a production flow we'd persist
-    // the attestation from DKG. The mock signer accepts this.
-    let dwallet_attestation = ika_dwallet_types::NetworkSignedAttestation {
-        attestation_data: vec![],
-        network_signature: vec![],
-        network_pubkey: vec![],
-        epoch: 1,
-    };
+    // Load the DKG attestation saved during `wallet add-chain`.
+    let dwallet_attestation = ika::load_attestation(_wallet_name)
+        .with_context(|| "failed to load dWallet attestation")?;
 
     let presign_id = ika::presign(config, grpc_url, dwallet_addr_bytes, curve, algo)?;
     eprintln!("✓ Presign allocated ({} bytes)", presign_id.len());

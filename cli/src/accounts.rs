@@ -209,14 +209,14 @@ pub struct IkaConfigAccount {
 /// Subset of the dWallet account needed by the CLI (curve + actual pubkey).
 ///
 /// On-chain layout (after the 1-byte discriminator + 1-byte version header):
-/// - `[2..34]`  authority
-/// - `[34]`     curve
-/// - `[35]`     state
-/// - `[36]`     public_key_len
-/// - `[37..102]` public_key (zero-padded to 65 bytes)
+/// - `[2..34]`   authority
+/// - `[34..36]`  curve (u16 LE)
+/// - `[36]`      state
+/// - `[37]`      public_key_len
+/// - `[38..103]` public_key (zero-padded to 65 bytes)
 #[derive(Debug, Serialize)]
 pub struct DWalletAccount {
-    pub curve: u8,
+    pub curve: u16,
     pub state: u8,
     pub public_key: Vec<u8>,
 }
@@ -239,19 +239,19 @@ pub fn parse_dwallet_authority(data: &[u8]) -> Result<solana_sdk::pubkey::Pubkey
 }
 
 pub fn parse_dwallet(data: &[u8]) -> Result<DWalletAccount> {
-    if data.len() < 102 || data[0] != 2 {
+    if data.len() < 103 || data[0] != 2 {
         return Err(anyhow!(
             "not a DWallet account (discriminator={})",
             data.first().unwrap_or(&0)
         ));
     }
-    let curve = data[34];
-    let state = data[35];
-    let public_key_len = data[36] as usize;
+    let curve = u16::from_le_bytes([data[34], data[35]]);
+    let state = data[36];
+    let public_key_len = data[37] as usize;
     if public_key_len == 0 || public_key_len > 65 {
         return Err(anyhow!("invalid dWallet public_key_len: {public_key_len}"));
     }
-    let public_key = data[37..37 + public_key_len].to_vec();
+    let public_key = data[38..38 + public_key_len].to_vec();
     Ok(DWalletAccount {
         curve,
         state,

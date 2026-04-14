@@ -313,6 +313,15 @@ pub fn handle(action: WalletAction, config: &RuntimeConfig) -> Result<()> {
                 eprintln!("✓ DKG complete");
                 eprintln!("  → dWallet address: {}", hex_encode(&dkg_result.dwallet_addr));
                 eprintln!("  → dWallet pubkey:  {}", hex_encode(&dkg_result.public_key));
+
+                // Persist the DKG attestation so `proposal execute` can use it
+                // for the gRPC Sign request later.
+                ika::save_attestation(
+                    &wallet_name,
+                    &dkg_result.attestation,
+                )?;
+                eprintln!("✓ Attestation saved");
+
                 (dkg_result.dwallet_addr, dkg_result.public_key)
             };
 
